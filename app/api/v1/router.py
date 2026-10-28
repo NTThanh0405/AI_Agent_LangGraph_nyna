@@ -1,4 +1,6 @@
 # app/api/v1/router.py
+# Gom các route của API v1 dưới tiền tố /api/v1 và quyết định route nào cần x-api-key.
+
 from fastapi import APIRouter, Depends
 
 from app.api.deps import verify_api_key

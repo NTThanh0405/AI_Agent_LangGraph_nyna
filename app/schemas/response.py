@@ -1,4 +1,6 @@
 # app/schemas/response.py
+# Schema dữ liệu response trả về từ endpoint /agent/invoke (câu trả lời + thread_id).
+
 from pydantic import BaseModel, Field
 
 

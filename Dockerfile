@@ -1,3 +1,6 @@
+# Dockerfile
+# Đóng gói dịch vụ LangGraph (FastAPI) thành Docker image để chạy trong docker compose.
+
 FROM python:3.11-slim
 
 WORKDIR /code

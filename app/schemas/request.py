@@ -1,3 +1,6 @@
+# app/schemas/request.py
+# Schema dữ liệu request gửi vào endpoint /agent/invoke (câu hỏi + thông tin người hỏi).
+
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field

@@ -1,0 +1,7 @@
+﻿# Caddyfile
+# Reverse proxy cho docker compose: tự cấp HTTPS và chuyển request vào n8n.
+# Service agent không đi qua đây vì chỉ n8n gọi nội bộ qua http://agent:8000.
+
+n8n.nynadatacoffee.com {
+    reverse_proxy n8n:5678
+}

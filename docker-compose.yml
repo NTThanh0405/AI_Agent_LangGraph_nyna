@@ -1,29 +1,45 @@
+# docker-compose.yml
+# Chạy cả hệ thống bằng một lệnh: docker compose up -d --build
+#   agent       : dịch vụ LangGraph (FastAPI) - chỉ n8n gọi được, không mở port ra ngoài
+#   n8n         : nhận tin nhắn Telegram và gọi sang agent
+#   cloudflared : Cloudflare Tunnel, đưa n8n ra Internet qua HTTPS (không cần mở port)
+
 services:
   agent:
-    build: ./langgraph-service
-    env_file: ./langgraph-service/.env
+    build: .                 # Dockerfile nằm ở thư mục gốc của repo
+    env_file: .env           # khoá API + thông tin PostgreSQL (không commit file này)
     restart: unless-stopped
-    # không có "ports" -> không lộ ra ngoài
+    # Cho phép container gọi tới máy chủ chứa Postgres khi DB nằm trên chính
+    # máy host (đặt DB_HOST=host.docker.internal trong .env). Nếu DB ở máy khác
+    # thì chỉ cần đặt DB_HOST là IP/hostname của máy đó.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Không có "ports" -> không lộ ra ngoài. n8n gọi qua http://agent:8000
 
   n8n:
     image: n8nio/n8n
     restart: unless-stopped
+    depends_on:
+      agent:
+        condition: service_healthy   # đợi agent sẵn sàng (theo HEALTHCHECK trong Dockerfile)
     environment:
-      - N8N_HOST=n8n.tenmiencuaban.com
+      - N8N_HOST=n8n.tenmiencuaban.com           # đổi thành tên miền phụ thật của bạn
       - N8N_PROTOCOL=https
-      - WEBHOOK_URL=https://n8n.tenmiencuaban.com/
+      - WEBHOOK_URL=https://n8n.tenmiencuaban.com/   # Telegram gọi webhook về địa chỉ này
+      - N8N_PROXY_HOPS=1                         # n8n đứng sau 1 proxy (Cloudflare)
       - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
     volumes:
-      - n8n_data:/home/node/.n8n
+      - n8n_data:/home/node/.n8n     # giữ workflow và credential khi restart
+    # Không có "ports" -> chỉ cloudflared truy cập được qua http://n8n:5678
 
-  caddy:
-    image: caddy:2
+  cloudflared:
+    image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    ports: ["80:80", "443:443"]
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy_data:/data
+    depends_on:
+      - n8n
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}   # lấy từ file .env
 
 volumes:
   n8n_data:
-  caddy_data:

@@ -6,3 +6,8 @@ python-dotenv>=1.0
 langgraph>=0.2
 langchain-core>=0.3
 langchain-anthropic>=0.3
+
+# --- PostgreSQL ---
+psycopg[binary,pool]>=3.2        # driver Postgres (async) + connection pool
+langgraph-checkpoint-postgres>=2.0  # lưu hội thoại của agent vào Postgres
+sqlglot>=25.0                    # phân tích câu SQL để chỉ cho phép SELECT

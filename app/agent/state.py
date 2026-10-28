@@ -1,14 +1,24 @@
-# app/agent/graph.py
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, StateGraph
+# app/agent/state.py
+# Định nghĩa "trạng thái" (state) chạy xuyên suốt graph LangGraph.
+# Mỗi node trong graph nhận state này vào và trả về phần state cần cập nhật.
 
-from app.agent.nodes.chat import chat_node
-from app.agent.state import AgentState
+from typing import Annotated, Optional, TypedDict
+
+from langchain_core.messages import AnyMessage
+from langgraph.graph.message import add_messages
 
 
-def build_graph(checkpointer=None):
-    builder = StateGraph(AgentState)
-    builder.add_node("chat", chat_node)
-    builder.add_edge(START, "chat")
-    builder.add_edge("chat", END)
-    return builder.compile(checkpointer=checkpointer or MemorySaver())
+class AgentState(TypedDict):
+    """Trạng thái của agent trong một lượt hội thoại."""
+
+    # Danh sách tin nhắn của hội thoại (người dùng, AI, kết quả tool).
+    # add_messages là reducer: tin nhắn mới được NỐI THÊM vào danh sách
+    # thay vì ghi đè, nhờ vậy agent nhớ được ngữ cảnh và các lần gọi tool.
+    messages: Annotated[list[AnyMessage], add_messages]
+
+    # ID người dùng (ví dụ Telegram user id) - dùng cho log và phân quyền.
+    user_id: Optional[str]
+
+    # Vai trò người dùng (ví dụ "boss", "manager") - quyết định bảng nào
+    # được phép truy vấn trong PostgreSQL (xem app/agent/permissions.py).
+    user_role: Optional[str]

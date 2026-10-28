@@ -1,4 +1,7 @@
 # app/api/deps.py
+# Dependency xác thực: kiểm tra header x-api-key khớp SERVICE_API_KEY
+# để chỉ n8n (nơi giữ khoá) mới gọi được các endpoint của agent.
+
 import secrets
 
 from fastapi import Header, HTTPException, status
