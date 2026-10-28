@@ -48,6 +48,44 @@ def _function_name(fn: exp.Expression) -> str:
     return (name or "").lower()
 
 
+def _with_of(node: exp.Expression):
+    """Lấy mệnh đề WITH của một node (tên arg khác nhau giữa các bản sqlglot)."""
+    w = node.args.get("with") or node.args.get("with_")
+    return w if isinstance(w, exp.With) else None
+
+
+def _visible_cte_names(table: exp.Table) -> set[str]:
+    """Tên các CTE thực sự nhìn thấy được tại vị trí của `table`.
+
+    Quy tắc giống PostgreSQL:
+    - Phần thân câu lệnh (và subquery bên trong) thấy mọi CTE của WITH bao quanh.
+    - Bên trong định nghĩa của một CTE chỉ thấy các CTE khai báo TRƯỚC nó;
+      tên chính nó chỉ hợp lệ khi WITH RECURSIVE.
+    Nhờ vậy `WITH salaries AS (SELECT * FROM salaries) ...` vẫn tính
+    `salaries` bên trong là bảng thật và phải qua kiểm tra quyền.
+    """
+    visible: set[str] = set()
+    child: exp.Expression = table
+    parent = table.parent
+    while parent is not None:
+        if isinstance(parent, exp.With):
+            # child là một CTE nằm trong WITH này
+            if parent.args.get("recursive"):
+                visible.update(c.alias.lower() for c in parent.expressions)
+            else:
+                for cte in parent.expressions:
+                    if cte is child:
+                        break
+                    visible.add(cte.alias.lower())
+        else:
+            w = _with_of(parent)
+            # Nếu child chính là WITH thì đã xử lý ở nhánh trên, bỏ qua
+            if w is not None and child is not w:
+                visible.update(c.alias.lower() for c in w.expressions)
+        child, parent = parent, parent.parent
+    return visible
+
+
 def check_select(sql: str, max_rows: int) -> CheckedQuery:
     """Kiểm tra một câu SQL; trả về CheckedQuery hoặc raise UnsafeSQLError."""
     try:
@@ -74,13 +112,13 @@ def check_select(sql: str, max_rows: int) -> CheckedQuery:
         ):
             raise UnsafeSQLError(f"Không được dùng hàm '{name}'")
 
-    cte_names = {cte.alias.lower() for cte in stmt.find_all(exp.CTE)}
     tables = set()
     for t in stmt.find_all(exp.Table):
         name = t.name.lower()
         if not name:  # ví dụ FROM generate_series(...)
             continue
-        if not t.db and name in cte_names:  # tên CTE, không phải bảng thật
+        # Tên CTE đang nhìn thấy được tại đây thì không phải bảng thật
+        if not t.db and name in _visible_cte_names(t):
             continue
         schema = (t.db or "public").lower()
         if t.catalog:

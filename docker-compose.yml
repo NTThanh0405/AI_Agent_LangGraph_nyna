@@ -23,11 +23,12 @@ services:
       agent:
         condition: service_healthy   # đợi agent sẵn sàng (theo HEALTHCHECK trong Dockerfile)
     environment:
-      - N8N_HOST=n8n.tenmiencuaban.com           # đổi thành tên miền phụ thật của bạn
+      - N8N_HOST=n8n.nynadatacoffee.com
       - N8N_PROTOCOL=https
-      - WEBHOOK_URL=https://n8n.tenmiencuaban.com/   # Telegram gọi webhook về địa chỉ này
-      - N8N_PROXY_HOPS=1                         # n8n đứng sau 1 proxy (Cloudflare)
+      - WEBHOOK_URL=https://n8n.nynadatacoffee.com/
+      - N8N_PROXY_HOPS=1
       - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
     volumes:
       - n8n_data:/home/node/.n8n     # giữ workflow và credential khi restart
     # Không có "ports" -> chỉ cloudflared truy cập được qua http://n8n:5678
