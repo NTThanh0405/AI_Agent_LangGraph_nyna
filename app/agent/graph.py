@@ -1,7 +1,8 @@
+# app/agent/graph.py
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from app.agent.nodes import chat_node
+from app.agent.nodes.chat import chat_node
 from app.agent.state import AgentState
 
 

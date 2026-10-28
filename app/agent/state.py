@@ -1,9 +1,14 @@
-from typing import Annotated
+# app/agent/graph.py
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
 
-from langgraph.graph.message import add_messages
-from typing_extensions import TypedDict
+from app.agent.nodes.chat import chat_node
+from app.agent.state import AgentState
 
 
-class AgentState(TypedDict):
-    # add_messages: tin nhắn mới được nối thêm vào danh sách, không ghi đè
-    messages: Annotated[list, add_messages]
+def build_graph(checkpointer=None):
+    builder = StateGraph(AgentState)
+    builder.add_node("chat", chat_node)
+    builder.add_edge(START, "chat")
+    builder.add_edge("chat", END)
+    return builder.compile(checkpointer=checkpointer or MemorySaver())

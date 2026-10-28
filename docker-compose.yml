@@ -1,0 +1,29 @@
+services:
+  agent:
+    build: ./langgraph-service
+    env_file: ./langgraph-service/.env
+    restart: unless-stopped
+    # không có "ports" -> không lộ ra ngoài
+
+  n8n:
+    image: n8nio/n8n
+    restart: unless-stopped
+    environment:
+      - N8N_HOST=n8n.tenmiencuaban.com
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://n8n.tenmiencuaban.com/
+      - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+
+volumes:
+  n8n_data:
+  caddy_data:

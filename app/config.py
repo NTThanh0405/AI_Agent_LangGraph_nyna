@@ -1,7 +1,7 @@
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -11,10 +11,16 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "langgraph-service"
-    anthropic_api_key: str
+    app_env: str = "development"
+
+    anthropic_api_key: SecretStr
+    service_api_key: SecretStr
+
     model_name: str = "claude-sonnet-5-5"
     temperature: float = 0.0
     max_tokens: int = 1024
+    llm_timeout: int = 60
+
     log_level: str = "INFO"
 
 
