@@ -57,26 +57,51 @@ Lỗi của tool được trả về dạng chữ để Claude tự sửa câu S
 
 ```
 .
+.
+langgraph-service/
 ├── app/
-│   ├── main.py                 # Khởi động FastAPI, mở pool + checkpointer, compile graph
-│   ├── config.py               # Cấu hình từ biến môi trường / .env
-│   ├── agent/
-│   │   ├── graph.py            # Dựng graph chat <-> tools
-│   │   ├── state.py            # AgentState: messages, user_id, user_role
-│   │   ├── permissions.py      # Phân quyền bảng theo vai trò
-│   │   ├── nodes/chat.py       # Node gọi Claude + system prompt
-│   │   └── tools/              # list_tables, describe_table, run_select_query
+│   ├── __init__.py
+│   ├── main.py                    # khởi động FastAPI, mở pool DB, compile graph (MemorySaver), chạy nền dọn phiên + dọn dashboard
+│   ├── config.py                  # cấu hình từ .env (API key, LLM, PostgreSQL, dashboard)
 │   ├── api/
-│   │   ├── deps.py             # Xác thực x-api-key
-│   │   └── v1/                 # router, agent_route (invoke), health
+│   │   ├── __init__.py
+│   │   ├── deps.py                # xác thực header x-api-key
+│   │   └── v1/
+│   │       ├── __init__.py
+│   │       ├── router.py          # gom route dưới /api/v1
+│   │       ├── agent_route.py     # POST /agent/invoke và POST /agent/reset (lệnh /new)
+│   │       └── health.py          # /health và /health/db
+│   ├── agent/
+│   │   ├── __init__.py
+│   │   ├── state.py               # AgentState (messages, user_id, user_role)
+│   │   ├── graph.py               # vòng lặp chat <-> tools, nhớ hội thoại bằng MemorySaver (RAM)
+│   │   ├── sessions.py            # phiên hội thoại: hết hạn sau 60 phút im lặng, dọn nền, reset
+│   │   ├── permissions.py         # vai trò nào được xem bảng nào (dwh.*)
+│   │   ├── nodes/
+│   │   │   ├── __init__.py
+│   │   │   └── chat.py            # node gọi Claude + system prompt
+│   │   └── tools/
+│   │       ├── __init__.py        # ALL_TOOLS
+│   │       ├── sql_tools.py       # list_tables, describe_table, run_select_query
+│   │       ├── dashboard_tools.py # create_dashboard: chạy SELECT, lưu file HTML, trả link, dọn file hết hạn
+│   │       └── dashboard_template.py  # template HTML cố định (Chart.js)
 │   ├── db/
-│   │   ├── pool.py             # Connection pool async (read-only)
-│   │   └── guard.py            # Kiểm tra SQL do LLM sinh ra
-│   └── schemas/                # request.py, response.py
-├── sql/create_readonly_role.sql  # Tạo role agent_readonly + agent_checkpoint
-├── Dockerfile
-├── docker-compose.yml          # agent + n8n + cloudflared
-└── requirements.txt
+│   │   ├── __init__.py
+│   │   ├── pool.py                # connection pool PostgreSQL (chỉ-đọc)
+│   │   └── guard.py               # chỉ cho phép SELECT, chặn lệnh nguy hiểm
+│   └── schemas/
+│       ├── __init__.py
+│       ├── request.py
+│       └── response.py
+├── sql/
+│   └── create_readonly_role.sql   # tạo role agent_readonly (chỉ đọc schema dwh, che cột cá nhân)
+├── .env                           # giá trị thật, không commit
+├── .gitignore
+├── Dockerfile                     # image agent, có thư mục /data/dashboards cho appuser
+├── docker-compose.yml             # agent + n8n + cloudflared + dashboards-web (nginx)
+├── nginx-dash.conf                # nginx chỉ phục vụ file dashboard tên ngẫu nhiên
+├── requirements.txt
+└── README.md
 ```
 
 ## API
