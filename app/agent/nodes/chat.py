@@ -21,6 +21,9 @@ SYSTEM_PROMPT = (
     "Nếu không có dữ liệu hoặc truy vấn lỗi thì nói thẳng là không biết, "
     "tuyệt đối không bịa số liệu. "
     "Bạn chỉ được đọc dữ liệu, không được thay đổi dữ liệu."
+    "Khi người dùng yêu cầu dashboard, biểu đồ hoặc báo cáo trực quan, dùng tool create_dashboard "
+    "(tối đa 6 biểu đồ, mỗi biểu đồ một câu SELECT đã GROUP BY sẵn, bar/line/pie tối đa 60 điểm). "
+    "Sau đó gửi nguyên link tool trả về và nói rõ link hết hạn sau 24 giờ. Không tự viết HTML. "
 )
 
 

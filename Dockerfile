@@ -15,6 +15,10 @@ RUN pip install -r requirements.txt
 
 # Tạo user không phải root
 RUN useradd -m appuser
+
+# Thư mục chứa dashboard HTML (gắn volume ở docker-compose), appuser phải ghi được
+RUN mkdir -p /data/dashboards && chown appuser:appuser /data/dashboards
+
 COPY --chown=appuser:appuser app ./app
 USER appuser
 

@@ -16,6 +16,7 @@ from app.config import get_settings
 from app.db.pool import close_pool, init_pool  # connection pool tới PostgreSQL
 import asyncio 
 from app.agent.sessions import sweep_loop
+from app.agent.tools.dashboard_tools import cleanup_loop as dashboard_cleanup_loop
 
 settings = get_settings()
 logging.basicConfig(
@@ -56,10 +57,12 @@ async def lifespan(app: FastAPI):
         app.state.graph = build_graph(ALL_TOOLS, checkpointer)
         app.state.graph = build_graph(ALL_TOOLS, checkpointer)
         sweeper = asyncio.create_task(sweep_loop(app.state.graph))
+        dash_cleaner = asyncio.create_task(dashboard_cleanup_loop())
 
         yield  # ---- app chạy ở đây ----
 
         sweeper.cancel()
+        dash_cleaner.cancel()
 
         yield  # ---- app chạy ở đây ----
 

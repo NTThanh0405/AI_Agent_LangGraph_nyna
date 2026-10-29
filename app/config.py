@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     db_statement_timeout_ms: int = 15000  # tự huỷ câu SQL chạy quá 15 giây
     db_max_rows: int = 200                # số dòng tối đa trả về cho LLM
 
+    # ---- Dashboard HTML ----
+    dashboard_dir: str = "/data/dashboards"   # phải khớp volume trong docker-compose
+    dashboard_base_url: str = ""              # vd https://dash.nynadatacoffee.com
+    dashboard_ttl_hours: int = 24
+    dashboard_max_charts: int = 6
+
     # ---- Lưu hội thoại (checkpoint) ----
     # Role chỉ-đọc KHÔNG tạo/ghi được bảng checkpoint, nên cần chuỗi kết nối
     # riêng (role có quyền ghi vào schema dành cho agent).
