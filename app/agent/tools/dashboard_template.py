@@ -2,6 +2,8 @@
 # Template HTML cố định của dashboard. Dữ liệu được nhúng dưới dạng JSON vào chỗ
 # __PAYLOAD__ và mọi chữ đều được đưa vào trang bằng textContent, nên nội dung lấy từ
 # database (tên món, ghi chú khách...) không thể chèn mã vào trang.
+# Chart.js được nginx (dashboards-web) phục vụ cùng máy chủ tại /chart.umd.min.js, không
+# nạp từ CDN; không tải được hoặc vẽ lỗi thì biểu đồ rơi về dạng bảng số liệu.
 # Giao diện: nền sáng/tối theo máy người xem, 1 cột trên điện thoại, 2 cột trên màn hình rộng.
 
 TEMPLATE = r"""<!DOCTYPE html>
@@ -56,7 +58,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 </main>
 
 <script type="application/json" id="payload">__PAYLOAD__</script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="chart.umd.min.js"></script>
 <script>
 (function () {
   var data = JSON.parse(document.getElementById('payload').textContent);
@@ -95,7 +97,6 @@ TEMPLATE = r"""<!DOCTYPE html>
     return wrap;
   }
 
-  // Dùng khi không tải được Chart.js (mất mạng, bị chặn CDN): hiện số liệu dạng bảng.
   function chartAsTable(c) {
     var columns = [c.x_name || 'Nhãn'].concat(c.series.map(function (s) { return s.name; }));
     var rows = c.labels.map(function (label, i) {
@@ -164,7 +165,11 @@ TEMPLATE = r"""<!DOCTYPE html>
     } else if (typeof Chart === 'undefined') {
       panel.appendChild(chartAsTable(c));
     } else {
-      panel.appendChild(buildChart(c));
+      try {
+        panel.appendChild(buildChart(c));
+      } catch (e) {
+        panel.appendChild(chartAsTable(c));
+      }
     }
     grid.appendChild(panel);
   });

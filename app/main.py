@@ -1,22 +1,22 @@
 # app/main.py
-# Điểm khởi động của dịch vụ FastAPI.
-# Việc chính: cấu hình log, khi khởi động thì mở connection pool PostgreSQL +
-# nơi lưu hội thoại (checkpointer) rồi compile graph LangGraph một lần,
-# khi tắt thì đóng các kết nối lại.
+# Điểm khởi động của dịch vụ FastAPI. Khi khởi động: cấu hình log, mở connection pool
+# PostgreSQL, chọn nơi lưu hội thoại (PostgresSaver hoặc RAM), compile graph một lần và
+# chạy hai tác vụ nền (dọn phiên hết hạn, dọn dashboard hết hạn). Khi tắt thì dừng các
+# tác vụ nền và đóng pool.
 
+import asyncio
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
 
 from app.agent.graph import build_graph
-from app.agent.tools import ALL_TOOLS  # các tool truy vấn DB của agent
+from app.agent.sessions import sweep_loop
+from app.agent.tools import ALL_TOOLS
+from app.agent.tools.dashboard_tools import cleanup_loop as dashboard_cleanup_loop
 from app.api.v1.router import api_router
 from app.config import get_settings
-from app.db.pool import close_pool, init_pool  # connection pool tới PostgreSQL
-import asyncio 
-from app.agent.sessions import sweep_loop
-from app.agent.tools.dashboard_tools import cleanup_loop as dashboard_cleanup_loop
+from app.db.pool import close_pool, init_pool
 
 settings = get_settings()
 logging.basicConfig(
@@ -28,49 +28,41 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Chạy khi app khởi động (trước yield) và khi app tắt (sau yield)."""
-    # 1) Mở pool kết nối tới PostgreSQL (tài khoản chỉ-đọc dùng cho tool SQL).
     await init_pool()
+    try:
+        async with AsyncExitStack() as stack:
+            checkpointer = None  # None -> graph dùng MemorySaver (RAM)
+            if settings.checkpoint_database_url:
+                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-    # 2) Chọn nơi lưu hội thoại theo thread_id.
-    #    AsyncExitStack giúp tự đóng kết nối checkpointer khi app tắt.
-    async with AsyncExitStack() as stack:
-        checkpointer = None  # None -> graph dùng MemorySaver (RAM)
-        if settings.checkpoint_database_url:
-            # Import tại chỗ: chỉ cần thư viện này khi bật lưu hội thoại vào Postgres.
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-            checkpointer = await stack.enter_async_context(
-                AsyncPostgresSaver.from_conn_string(
-                    settings.checkpoint_database_url.get_secret_value()
+                checkpointer = await stack.enter_async_context(
+                    AsyncPostgresSaver.from_conn_string(
+                        settings.checkpoint_database_url.get_secret_value()
+                    )
                 )
-            )
-            await checkpointer.setup()  # tạo bảng checkpoint nếu chưa có
-            logger.info("Hội thoại được lưu trong PostgreSQL (PostgresSaver)")
-        else:
-            logger.warning(
-                "Chưa cấu hình CHECKPOINT_DATABASE_URL: hội thoại lưu trong RAM, "
-                "sẽ mất khi restart"
-            )
+                await checkpointer.setup()
+                logger.info("Hội thoại được lưu trong PostgreSQL (PostgresSaver)")
+            else:
+                logger.warning(
+                    "Chưa cấu hình CHECKPOINT_DATABASE_URL: hội thoại lưu trong RAM, "
+                    "sẽ mất khi restart"
+                )
 
-        # 3) Compile graph một lần duy nhất và dùng chung cho mọi request.
-        app.state.graph = build_graph(ALL_TOOLS, checkpointer)
-        app.state.graph = build_graph(ALL_TOOLS, checkpointer)
-        sweeper = asyncio.create_task(sweep_loop(app.state.graph))
-        dash_cleaner = asyncio.create_task(dashboard_cleanup_loop())
-
-        yield  # ---- app chạy ở đây ----
-
-        sweeper.cancel()
-        dash_cleaner.cancel()
-
-        yield  # ---- app chạy ở đây ----
-
-    # 4) App tắt: đóng pool kết nối DB.
-    await close_pool()
+            app.state.graph = build_graph(ALL_TOOLS, checkpointer)
+            tasks = [
+                asyncio.create_task(sweep_loop(app.state.graph)),
+                asyncio.create_task(dashboard_cleanup_loop()),
+            ]
+            try:
+                yield
+            finally:
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        await close_pool()
 
 
-# Production thì ẩn trang tài liệu API (/docs, /openapi.json) cho an toàn.
 is_prod = settings.app_env == "production"
 
 app = FastAPI(

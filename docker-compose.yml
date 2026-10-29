@@ -1,27 +1,41 @@
 # docker-compose.yml
 # Chạy cả hệ thống bằng một lệnh: docker compose up -d --build
-#   agent       : dịch vụ LangGraph (FastAPI) - chỉ n8n gọi được, không mở port ra ngoài
-#   n8n         : nhận tin nhắn Telegram và gọi sang agent
-#   cloudflared : Cloudflare Tunnel, đưa n8n ra Internet qua HTTPS (không cần mở port)
+#   agent         : dịch vụ LangGraph (FastAPI), chỉ n8n gọi được, không mở port ra ngoài
+#   dashboards-web: nginx phục vụ file dashboard tên ngẫu nhiên (chỉ đọc) và file Chart.js
+#   n8n           : nhận tin nhắn Telegram và gọi sang agent
+#   cloudflared   : Cloudflare Tunnel, đưa n8n và dashboards-web ra Internet qua HTTPS
+# Phiên bản image n8n/cloudflared đặt qua N8N_IMAGE_TAG / CLOUDFLARED_IMAGE_TAG trong .env
+# (mặc định latest; nên ghim phiên bản đang chạy ổn, xem bằng: docker compose images).
 
 services:
   agent:
-    build: .                 # Dockerfile nằm ở thư mục gốc của repo
-    env_file: .env           # khoá API + thông tin PostgreSQL (không commit file này)
+    build: .
+    env_file: .env
     restart: unless-stopped
-    # Cho phép container gọi tới máy chủ chứa Postgres khi DB nằm trên chính
-    # máy host (đặt DB_HOST=host.docker.internal trong .env). Nếu DB ở máy khác
-    # thì chỉ cần đặt DB_HOST là IP/hostname của máy đó.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    # Không có "ports" -> không lộ ra ngoài. n8n gọi qua http://agent:8000
+    volumes:
+      - dashboards:/data/dashboards
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 1g
+
+  dashboards-web:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - dashboards:/usr/share/nginx/html:ro
+      - ./nginx-dash.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./static:/usr/share/nginx/static:ro
 
   n8n:
-    image: n8nio/n8n
+    image: n8nio/n8n:${N8N_IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
       agent:
-        condition: service_healthy   # đợi agent sẵn sàng (theo HEALTHCHECK trong Dockerfile)
+        condition: service_healthy
     environment:
       - N8N_HOST=n8n.nynadatacoffee.com
       - N8N_PROTOCOL=https
@@ -30,17 +44,18 @@ services:
       - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
     volumes:
-      - n8n_data:/home/node/.n8n     # giữ workflow và credential khi restart
-    # Không có "ports" -> chỉ cloudflared truy cập được qua http://n8n:5678
+      - n8n_data:/home/node/.n8n
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:${CLOUDFLARED_IMAGE_TAG:-latest}
     restart: unless-stopped
     depends_on:
       - n8n
+      - dashboards-web
     command: tunnel --no-autoupdate run
     environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}   
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
 
 volumes:
   n8n_data:
+  dashboards:

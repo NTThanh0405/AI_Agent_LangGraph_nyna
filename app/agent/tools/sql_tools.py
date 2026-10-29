@@ -2,6 +2,7 @@
 # Ba tool để agent làm việc với PostgreSQL nội bộ: liệt kê bảng, xem cột của bảng,
 # chạy câu SELECT. Mọi tool đều lọc theo quyền của người hỏi (user_role, lấy từ config
 # do app/api/v1/agent_route.py truyền vào) và trả lỗi dạng chữ để LLM tự sửa câu SQL.
+# Bảng không ghi schema được hiểu là schema mặc định DB_SCHEMA (dwh).
 
 import logging
 from typing import Optional
@@ -17,7 +18,8 @@ from app.db.pool import get_pool
 
 logger = logging.getLogger(__name__)
 
-_MAX_CELL_CHARS = 200  # cắt ô dữ liệu quá dài để không tràn ngữ cảnh của LLM
+_MAX_CELL_CHARS = 200      # cắt ô dữ liệu quá dài
+_MAX_OUTPUT_CHARS = 20000  # cắt tổng kết quả để không tràn ngữ cảnh của LLM
 
 
 def _caller(config: RunnableConfig) -> tuple[Optional[str], Optional[str]]:
@@ -33,23 +35,27 @@ def _cell(value) -> str:
     return text if len(text) <= _MAX_CELL_CHARS else text[:_MAX_CELL_CHARS] + "..."
 
 
+def _first_line(e: Exception) -> str:
+    return (str(e).splitlines() or [""])[0]
+
+
 @tool
 async def list_tables(config: RunnableConfig) -> str:
     """Liệt kê các bảng/view mà người dùng hiện tại được phép xem, dạng schema.table."""
     _, role = _caller(config)
+    schema = get_settings().db_schema
     query = (
         "SELECT table_schema, table_name FROM information_schema.tables "
-        "WHERE table_schema NOT IN ('pg_catalog', 'information_schema') "
-        "AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY 1, 2"
+        "WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY 1, 2"
     )
     try:
         async with get_pool().connection() as conn:
-            rows = await (await conn.execute(query)).fetchall()
+            rows = await (await conn.execute(query, (schema,))).fetchall()
     except psycopg.Error as e:
         logger.warning("list_tables lỗi: %s", e)
         return "Không đọc được danh sách bảng từ database."
 
-    names = filter_tables(role, (f"{schema}.{table}" for schema, table in rows))
+    names = filter_tables(role, (f"{s}.{t}" for s, t in rows))
     return "\n".join(names) if names else "Không có bảng nào bạn được phép xem."
 
 
@@ -57,11 +63,12 @@ async def list_tables(config: RunnableConfig) -> str:
 async def describe_table(table_name: str, config: RunnableConfig) -> str:
     """Xem danh sách cột (tên, kiểu dữ liệu, có cho NULL không) của một bảng.
 
-    table_name dạng "schema.table" hoặc "table" (mặc định schema public).
+    table_name dạng "dwh.table" hoặc "table" (mặc định schema dwh). Chỉ hiện các cột
+    được phép đọc; thông tin cá nhân của khách không nằm trong danh sách.
     """
     _, role = _caller(config)
     schema, _, table = table_name.strip().lower().rpartition(".")
-    schema = schema or "public"
+    schema = schema or get_settings().db_schema
     not_found = f"Không tìm thấy bảng '{table_name}' hoặc bạn không có quyền xem."
 
     if not can_access(role, f"{schema}.{table}"):
@@ -89,8 +96,9 @@ async def describe_table(table_name: str, config: RunnableConfig) -> str:
 async def run_select_query(query: str, config: RunnableConfig) -> str:
     """Chạy MỘT câu SELECT (PostgreSQL) và trả kết quả dạng bảng chữ.
 
-    Chỉ được đọc dữ liệu, chỉ dùng các bảng người dùng được phép xem. Nên dùng
-    describe_table trước để biết đúng tên cột. Kết quả bị giới hạn số dòng.
+    Chỉ được đọc dữ liệu, chỉ dùng các bảng người dùng được phép xem, ghi tên bảng dạng
+    dwh.<bảng>. Không dùng SELECT *, luôn liệt kê cột cụ thể (xem describe_table trước).
+    Kết quả bị giới hạn số dòng.
     """
     user_id, role = _caller(config)
     max_rows = get_settings().db_max_rows
@@ -109,9 +117,14 @@ async def run_select_query(query: str, config: RunnableConfig) -> str:
             columns = [c.name for c in cursor.description]
     except psycopg.errors.QueryCanceled:
         return "Truy vấn chạy quá lâu nên bị huỷ. Hãy thu hẹp điều kiện lọc hoặc khoảng thời gian."
+    except psycopg.errors.InsufficientPrivilege:
+        return (
+            "Không có quyền đọc một số cột trong truy vấn. Đừng dùng SELECT *, "
+            "hãy chỉ chọn các cột có trong describe_table."
+        )
     except psycopg.Error as e:
         logger.warning("run_select_query lỗi: %s", e)
-        return f"Lỗi khi chạy truy vấn: {str(e).splitlines()[0]}"
+        return f"Lỗi khi chạy truy vấn: {_first_line(e)}"
 
     truncated = len(rows) > max_rows
     rows = rows[:max_rows]
@@ -122,4 +135,7 @@ async def run_select_query(query: str, config: RunnableConfig) -> str:
     lines += [" | ".join(_cell(v) for v in row) for row in rows]
     if truncated:
         lines.append(f"(đã cắt, chỉ hiển thị {max_rows} dòng đầu)")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) > _MAX_OUTPUT_CHARS:
+        text = text[:_MAX_OUTPUT_CHARS] + "\n(đã cắt bớt vì kết quả quá dài, hãy thu hẹp truy vấn)"
+    return text

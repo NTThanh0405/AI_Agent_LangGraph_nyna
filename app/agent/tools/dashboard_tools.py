@@ -4,7 +4,8 @@
 # code tự chạy SQL (qua đúng check_select + phân quyền theo vai trò), đổ dữ liệu vào
 # template cố định, lưu file với tên ngẫu nhiên rồi trả link. LLM không tự viết HTML.
 # File được ghi vào DASHBOARD_DIR (volume dùng chung); container dashboards-web (nginx)
-# đọc thư mục đó để phục vụ link. cleanup_loop xoá file quá DASHBOARD_TTL_HOURS.
+# đọc thư mục đó để phục vụ link. Số file và dung lượng thư mục có giới hạn;
+# cleanup_loop xoá file quá DASHBOARD_TTL_HOURS.
 
 import asyncio
 import json
@@ -32,28 +33,33 @@ from app.db.pool import get_pool
 
 logger = logging.getLogger(__name__)
 
-VN_TZ = timezone(timedelta(hours=7))   # Asia/Ho_Chi_Minh, không cần gói tzdata
-MAX_CHART_POINTS = 60                  # biểu đồ nhiều điểm hơn thì khó đọc, bắt LLM gom nhóm lại
-CLEANUP_INTERVAL_SECONDS = 1800
+VN_TZ = timezone(timedelta(hours=7))
+MAX_CHART_POINTS = 60
+MAX_FILES = 500
+MAX_TOTAL_BYTES = 200 * 1024 * 1024
+CLEANUP_INTERVAL_SECONDS = 300
 
 
 class ChartSpec(BaseModel):
     """Mô tả một biểu đồ trong dashboard."""
 
-    title: str = Field(description="Tiêu đề biểu đồ, ngắn gọn")
+    title: str = Field(max_length=120, description="Tiêu đề biểu đồ, ngắn gọn")
     type: Literal["bar", "line", "pie", "table"] = Field(
         description="bar: cột; line: đường (theo thời gian); pie: tròn (tỷ trọng); table: bảng số liệu"
     )
     sql: str = Field(
-        description="MỘT câu SELECT PostgreSQL, đã GROUP BY sẵn, đặt alias cột rõ ràng. "
-        "Luôn ghi tên bảng dạng dwh.<bảng>."
+        max_length=4000,
+        description="MỘT câu SELECT PostgreSQL nhẹ, đã GROUP BY sẵn, đặt alias cột rõ ràng. "
+        "Luôn ghi tên bảng dạng dwh.<bảng>. Biểu đồ line: luôn ORDER BY cột x tăng dần.",
     )
     x: Optional[str] = Field(
         default=None,
+        max_length=64,
         description="Tên cột làm nhãn (trục X của bar/line, tên lát cắt của pie). Không cần với table.",
     )
     y: list[str] = Field(
         default_factory=list,
+        max_length=6,
         description="Tên các cột SỐ làm giá trị. pie chỉ dùng cột đầu. Không cần với table.",
     )
 
@@ -62,8 +68,11 @@ class _ChartError(Exception):
     """Lỗi do mô tả biểu đồ sai; trả lại cho LLM dạng chữ để tự sửa."""
 
 
+def _first_line(e: Exception) -> str:
+    return (str(e).splitlines() or [""])[0]
+
+
 def _json_value(v):
-    """Chuyển giá trị từ database sang kiểu JSON an toàn."""
     if v is None or isinstance(v, (bool, int, str)):
         return v if not isinstance(v, str) else v[:200]
     if isinstance(v, (float, Decimal)):
@@ -97,12 +106,15 @@ async def _build_chart(conn, spec: ChartSpec, role: Optional[str], max_rows: int
         raise _ChartError(f"biểu đồ '{spec.title}': câu SQL bị từ chối: {e}")
 
     cursor = await conn.execute(checked.sql)
-    rows = (await cursor.fetchall())[:max_rows]
+    fetched = await cursor.fetchall()
+    truncated = len(fetched) > max_rows
+    rows = fetched[:max_rows]
     columns = [c.name for c in cursor.description]
 
     if spec.type == "table":
+        title = f"{spec.title} (chỉ hiển thị {max_rows} dòng đầu)" if truncated else spec.title
         return {
-            "title": spec.title, "type": "table", "columns": columns,
+            "title": title, "type": "table", "columns": columns,
             "rows": [[_json_value(v) for v in r] for r in rows],
         }
 
@@ -111,7 +123,7 @@ async def _build_chart(conn, spec: ChartSpec, role: Optional[str], max_rows: int
     value_cols = spec.y[:1] if spec.type == "pie" else spec.y
     if not value_cols or any(y not in columns for y in value_cols):
         raise _ChartError(f"biểu đồ '{spec.title}': y phải là các cột số trong {columns}")
-    if len(rows) > MAX_CHART_POINTS:
+    if truncated or len(rows) > MAX_CHART_POINTS:
         raise _ChartError(
             f"biểu đồ '{spec.title}': có hơn {MAX_CHART_POINTS} điểm dữ liệu, "
             "hãy gom nhóm lại hoặc dùng ORDER BY ... LIMIT"
@@ -129,6 +141,17 @@ async def _build_chart(conn, spec: ChartSpec, role: Optional[str], max_rows: int
     }
 
 
+def _dir_full(directory: Path) -> bool:
+    count = total = 0
+    for p in directory.glob("*.html"):
+        try:
+            total += p.stat().st_size
+            count += 1
+        except FileNotFoundError:  # vừa bị cleanup xoá
+            pass
+    return count >= MAX_FILES or total >= MAX_TOTAL_BYTES
+
+
 def _write_atomic(tmp: Path, final: Path, html: str) -> None:
     tmp.write_text(html, encoding="utf-8")
     os.replace(tmp, final)  # nginx chỉ phục vụ *.html nên không bao giờ thấy file dở dang
@@ -139,7 +162,7 @@ async def create_dashboard(title: str, charts: list[ChartSpec], config: Runnable
     """Tạo dashboard HTML trực quan (biểu đồ cột/đường/tròn và bảng) rồi trả về LINK để xem.
 
     Chỉ dùng khi người dùng yêu cầu dashboard, biểu đồ hoặc báo cáo trực quan.
-    Mỗi biểu đồ gồm một câu SELECT đã gom nhóm sẵn. Chỉ dùng bảng người dùng được phép xem.
+    Mỗi biểu đồ gồm một câu SELECT nhẹ, đã gom nhóm sẵn. Chỉ dùng bảng người dùng được phép xem.
     Dashboard là ảnh chụp số liệu lúc tạo và tự hết hạn sau một thời gian.
     """
     s = get_settings()
@@ -160,9 +183,14 @@ async def create_dashboard(title: str, charts: list[ChartSpec], config: Runnable
         return f"Không tạo được dashboard: {e}"
     except psycopg.errors.QueryCanceled:
         return "Một truy vấn chạy quá lâu nên bị huỷ. Hãy thu hẹp điều kiện lọc hoặc khoảng thời gian."
+    except psycopg.errors.InsufficientPrivilege:
+        return (
+            "Không có quyền đọc một số cột trong truy vấn. Đừng dùng SELECT *, "
+            "hãy chỉ chọn các cột có trong describe_table."
+        )
     except psycopg.Error as e:
         logger.warning("create_dashboard lỗi: %s", e)
-        return f"Lỗi khi chạy truy vấn: {str(e).splitlines()[0]}"
+        return f"Lỗi khi chạy truy vấn: {_first_line(e)}"
 
     now = datetime.now(VN_TZ)
     payload = {
@@ -179,9 +207,11 @@ async def create_dashboard(title: str, charts: list[ChartSpec], config: Runnable
     html = TEMPLATE.replace("__PAYLOAD__", blob)
 
     directory = Path(s.dashboard_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-    name = secrets.token_hex(24)  # 48 ký tự hex = 192 bit ngẫu nhiên, không đoán được
+    name = secrets.token_hex(24)  # 192 bit ngẫu nhiên, không đoán được
     try:
+        directory.mkdir(parents=True, exist_ok=True)
+        if await asyncio.to_thread(_dir_full, directory):
+            return "Kho dashboard đang đầy, vui lòng thử lại sau ít phút."
         await asyncio.to_thread(
             _write_atomic, directory / f"{name}.tmp", directory / f"{name}.html", html
         )
@@ -199,8 +229,6 @@ async def create_dashboard(title: str, charts: list[ChartSpec], config: Runnable
         "Hãy gửi nguyên văn link này cho người dùng."
     )
 
-
-# ---- Dọn file hết hạn -------------------------------------------------------
 
 def _cleanup_once(directory: Path, max_age_seconds: float) -> int:
     if not directory.is_dir():
