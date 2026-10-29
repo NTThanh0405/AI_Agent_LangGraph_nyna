@@ -56,12 +56,9 @@ Lỗi của tool được trả về dạng chữ để Claude tự sửa câu S
 ## Cấu trúc thư mục
 
 ```
-.
-<<<<<<< HEAD
 =======
 .
 langgraph-service/
->>>>>>> 0b899d4da8097a1b2d7660a21326605edc635c47
 ├── app/
 │   ├── main.py                 # Khởi động FastAPI, mở pool + checkpointer, compile graph
 │   ├── config.py               # Cấu hình từ biến môi trường / .env
@@ -75,14 +72,6 @@ langgraph-service/
 │   │   ├── deps.py             # Xác thực x-api-key
 │   │   └── v1/                 # router, agent_route (invoke), health
 │   ├── db/
-<<<<<<< HEAD
-│   │   ├── pool.py             # Connection pool async (read-only)
-│   │   └── guard.py            # Kiểm tra SQL do LLM sinh ra
-│   └── schemas/                # request.py, response.py
-├── sql/create_readonly_role.sql  # Tạo role agent_readonly + agent_checkpoint
-├── Dockerfile
-├── docker-compose.yml          # agent + n8n + cloudflared
-└── requirements.txt
 =======
 │   │   ├── __init__.py
 │   │   ├── pool.py                # connection pool PostgreSQL (chỉ-đọc)
@@ -100,7 +89,6 @@ langgraph-service/
 ├── nginx-dash.conf                # nginx chỉ phục vụ file dashboard tên ngẫu nhiên
 ├── requirements.txt
 └── README.md
->>>>>>> 0b899d4da8097a1b2d7660a21326605edc635c47
 ```
 
 ## API
@@ -163,26 +151,6 @@ Sửa `ROLE_TABLES` trong `app/agent/permissions.py` cho khớp database thật.
 ### 3. Tạo file `.env` (không commit)
 
 ```env
-<<<<<<< HEAD
-# Bắt buộc
-ANTHROPIC_API_KEY=sk-ant-...
-SERVICE_API_KEY=chuoi-bi-mat-dai-ngau-nhien
-
-# PostgreSQL (tài khoản chỉ-đọc)
-DB_HOST=host.docker.internal      # hoặc IP/hostname máy chứa DB
-DB_PORT=5432
-DB_NAME=your_db
-DB_USER=agent_readonly
-DB_PASSWORD=DOI_MAT_KHAU_1
-
-# Lưu hội thoại vào Postgres (bỏ trống -> lưu RAM, mất khi restart)
-CHECKPOINT_DATABASE_URL=postgresql://agent_checkpoint:DOI_MAT_KHAU_2@host.docker.internal:5432/your_db
-
-# Cloudflare Tunnel
-CLOUDFLARE_TUNNEL_TOKEN=...
-
-# Tuỳ chọn (giá trị mặc định)
-APP_ENV=production                # production sẽ tắt /docs
 =======
 # ===== Ứng dụng =====
 APP_NAME=langgraph-service
@@ -197,12 +165,7 @@ MODEL_NAME=claude-sonnet-5-5
 TEMPERATURE=0
 MAX_TOKENS=2048
 LLM_TIMEOUT=60
-<<<<<<< HEAD
-DB_POOL_MIN=1
-DB_POOL_MAX=5
-DB_STATEMENT_TIMEOUT_MS=15000
-DB_MAX_ROWS=200
-LOG_LEVEL=INFO
+
 =======
 
 # ===== Bảo mật =====
@@ -226,7 +189,6 @@ DB_PASSWORD=MAT KHAU
 # ===== Cloudflare Tunnel =====
 # Zero Trust > Networks > Tunnels > tunnel của bạn > copy token
 CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi...
->>>>>>> 0b899d4da8097a1b2d7660a21326605edc635c47
 ```
 
 > Nếu mật khẩu trong `CHECKPOINT_DATABASE_URL` có ký tự đặc biệt (`@`, `:`, `/`), hãy mã hoá URL ký tự đó.
@@ -252,12 +214,9 @@ Khi khởi động, log sẽ báo hội thoại đang lưu trong PostgreSQL hay 
 
 ### 6. Dựng workflow n8n
 
-<<<<<<< HEAD
-- **Tác giả:** [NTThanh0405](https://github.com/NTThanh0405)
-- **Project:** AI Agent LangGraph NYNA
+
 =======
 =======
->>>>>>> 0b899d4da8097a1b2d7660a21326605edc635c47
 Mở n8n qua tên miền đã cấu hình và tạo workflow:
 
 1. **Telegram Trigger** nhận tin nhắn.
@@ -303,7 +262,3 @@ uvicorn app.main:app --reload --port 8000
 - Mọi vai trò dùng chung một tài khoản DB, nên chưa che cột nhạy cảm theo vai trò (muốn che thì dùng view hoặc `GRANT SELECT (cột...)`).
 - Workflow n8n chưa được lưu trong repo.
 - Chưa có giới hạn tần suất (rate limit) theo `user_id`.
-<<<<<<< HEAD
-
-=======
->>>>>>> 0b899d4da8097a1b2d7660a21326605edc635c47
