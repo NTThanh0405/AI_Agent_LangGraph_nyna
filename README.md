@@ -164,34 +164,40 @@ Sửa `ROLE_TABLES` trong `app/agent/permissions.py` cho khớp database thật.
 ### 3. Tạo file `.env` (không commit)
 
 ```env
-# Bắt buộc
-ANTHROPIC_API_KEY=sk-ant-...
-SERVICE_API_KEY=chuoi-bi-mat-dai-ngau-nhien
+# ===== Ứng dụng =====
+APP_NAME=langgraph-service
+# "production" sẽ tắt trang /docs
+APP_ENV=production
+LOG_LEVEL=INFO
 
-# PostgreSQL (tài khoản chỉ-đọc)
-DB_HOST=host.docker.internal      # hoặc IP/hostname máy chứa DB
-DB_PORT=5432
-DB_NAME=your_db
-DB_USER=agent_readonly
-DB_PASSWORD=DOI_MAT_KHAU_1
-
-# Lưu hội thoại vào Postgres (bỏ trống -> lưu RAM, mất khi restart)
-CHECKPOINT_DATABASE_URL=postgresql://agent_checkpoint:DOI_MAT_KHAU_2@host.docker.internal:5432/your_db
-
-# Cloudflare Tunnel
-CLOUDFLARE_TUNNEL_TOKEN=...
-
-# Tuỳ chọn (giá trị mặc định)
-APP_ENV=production                # production sẽ tắt /docs
+# ===== LLM =====
+ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
 MODEL_NAME=claude-sonnet-5-5
 TEMPERATURE=0
 MAX_TOKENS=2048
 LLM_TIMEOUT=60
-DB_POOL_MIN=1
-DB_POOL_MAX=5
-DB_STATEMENT_TIMEOUT_MS=15000
-DB_MAX_ROWS=200
-LOG_LEVEL=INFO
+
+# ===== Bảo mật =====
+# n8n gửi key này trong header X-API-Key
+# Tạo key mới bằng: openssl rand -hex 32
+SERVICE_API_KEY=dan_key_moi_vao_day
+
+# ===== n8n =====
+# Tạo bằng: openssl rand -hex 32. PHẢI sao lưu, mất khoá là không giải mã được credential đã lưu
+N8N_ENCRYPTION_KEY=dan_key_ngau_nhien_vao_day
+
+# ===== PostgreSQL (role chỉ-đọc cho agent truy vấn) =====
+# DB trên chính máy host: host.docker.internal
+# DB ở máy khác: IP hoặc hostname của máy đó
+DB_HOST=host.docker.internal
+DB_PORT=5432
+DB_NAME=NAME DB
+DB_USER=agent_readonly
+DB_PASSWORD=MAT KHAU
+
+# ===== Cloudflare Tunnel =====
+# Zero Trust > Networks > Tunnels > tunnel của bạn > copy token
+CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi...
 ```
 
 > Nếu mật khẩu trong `CHECKPOINT_DATABASE_URL` có ký tự đặc biệt (`@`, `:`, `/`), hãy mã hoá URL ký tự đó.
