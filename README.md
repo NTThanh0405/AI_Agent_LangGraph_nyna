@@ -25,16 +25,51 @@ Hệ thống AI Agent thông minh được phát triển dựa trên **LangGraph
 ## 📁 Cấu trúc dự án
 
 ```text
-AI_Agent_LangGraph_nyna/
-├── config/             # Cấu hình hệ thống, API Keys
-├── core/               # Định nghĩa Graph, Nodes và Edges
-│   ├── state.py        # Định nghĩa AgentState
-│   ├── nodes.py        # Các hàm xử lý (Nodes)
-│   └── graph.py        # Khởi tạo và compile LangGraph
-├── tools/              # Các công cụ mở rộng (Search, Web Browsing, DB,...)
-├── main.py             # File chạy chính ứng dụng
-├── requirements.txt    # Các thư viện phụ thuộc
-└── README.md           # Tài liệu hướng dẫn
+langgraph-service/
+├── app/
+│   ├── __init__.py
+│   ├── main.py                    # khởi động FastAPI, mở pool DB, compile graph (MemorySaver), chạy nền dọn phiên + dọn dashboard
+│   ├── config.py                  # cấu hình từ .env (API key, LLM, PostgreSQL, dashboard)
+│   ├── api/
+│   │   ├── __init__.py
+│   │   ├── deps.py                # xác thực header x-api-key
+│   │   └── v1/
+│   │       ├── __init__.py
+│   │       ├── router.py          # gom route dưới /api/v1
+│   │       ├── agent_route.py     # POST /agent/invoke và POST /agent/reset (lệnh /new)
+│   │       └── health.py          # /health và /health/db
+│   ├── agent/
+│   │   ├── __init__.py
+│   │   ├── state.py               # AgentState (messages, user_id, user_role)
+│   │   ├── graph.py               # vòng lặp chat <-> tools, nhớ hội thoại bằng MemorySaver (RAM)
+│   │   ├── sessions.py            # phiên hội thoại: hết hạn sau 60 phút im lặng, dọn nền, reset
+│   │   ├── permissions.py         # vai trò nào được xem bảng nào (dwh.*)
+│   │   ├── nodes/
+│   │   │   ├── __init__.py
+│   │   │   └── chat.py            # node gọi Claude + system prompt
+│   │   └── tools/
+│   │       ├── __init__.py        # ALL_TOOLS
+│   │       ├── sql_tools.py       # list_tables, describe_table, run_select_query
+│   │       ├── dashboard_tools.py # create_dashboard: chạy SELECT, lưu file HTML, trả link, dọn file hết hạn
+│   │       └── dashboard_template.py  # template HTML cố định (Chart.js)
+│   ├── db/
+│   │   ├── __init__.py
+│   │   ├── pool.py                # connection pool PostgreSQL (chỉ-đọc)
+│   │   └── guard.py               # chỉ cho phép SELECT, chặn lệnh nguy hiểm
+│   └── schemas/
+│       ├── __init__.py
+│       ├── request.py
+│       └── response.py
+├── sql/
+│   └── create_readonly_role.sql   # tạo role agent_readonly (chỉ đọc schema dwh, che cột cá nhân)
+├── .env                           # giá trị thật, không commit
+├── .env.example                   # mẫu biến môi trường
+├── .gitignore
+├── Dockerfile                     # image agent, có thư mục /data/dashboards cho appuser
+├── docker-compose.yml             # agent + n8n + cloudflared + dashboards-web (nginx)
+├── nginx-dash.conf                # nginx chỉ phục vụ file dashboard tên ngẫu nhiên
+├── requirements.txt
+└── README.md
 ```
 
 ---
