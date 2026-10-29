@@ -14,6 +14,8 @@ from app.agent.tools import ALL_TOOLS  # các tool truy vấn DB của agent
 from app.api.v1.router import api_router
 from app.config import get_settings
 from app.db.pool import close_pool, init_pool  # connection pool tới PostgreSQL
+import asyncio 
+from app.agent.sessions import sweep_loop
 
 settings = get_settings()
 logging.basicConfig(
@@ -52,6 +54,12 @@ async def lifespan(app: FastAPI):
 
         # 3) Compile graph một lần duy nhất và dùng chung cho mọi request.
         app.state.graph = build_graph(ALL_TOOLS, checkpointer)
+        app.state.graph = build_graph(ALL_TOOLS, checkpointer)
+        sweeper = asyncio.create_task(sweep_loop(app.state.graph))
+
+        yield  # ---- app chạy ở đây ----
+
+        sweeper.cancel()
 
         yield  # ---- app chạy ở đây ----
 

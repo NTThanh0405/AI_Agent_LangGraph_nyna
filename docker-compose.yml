@@ -40,7 +40,7 @@ services:
       - n8n
     command: tunnel --no-autoupdate run
     environment:
-      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}   # lấy từ file .env
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}   
 
 volumes:
   n8n_data:
