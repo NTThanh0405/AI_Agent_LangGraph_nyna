@@ -137,9 +137,3 @@ for output in app.stream(inputs):
 
 - **Tác giả:** [NTThanh0405](https://github.com/NTThanh0405)
 - **Project:** AI Agent LangGraph NYNA
-
----
-
-## 📄 Giấy phép (License)
-
-Dự án này được phát hành dưới giấy phép [MIT License](LICENSE).
