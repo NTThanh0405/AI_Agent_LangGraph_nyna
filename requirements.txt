@@ -3,12 +3,15 @@ uvicorn[standard]>=0.30
 pydantic>=2.7
 pydantic-settings>=2.3
 python-dotenv>=1.0
+tzdata>=2024.1                      # múi giờ Asia/Ho_Chi_Minh cho ZoneInfo (image slim có thể thiếu)
+
 langgraph>=0.2
 langchain-core>=0.3
 langchain-anthropic>=0.3
 langgraph-checkpoint>=2.1
 
 # --- PostgreSQL ---
-psycopg[binary,pool]>=3.2        # driver Postgres (async) + connection pool
-langgraph-checkpoint-postgres>=2.0  # lưu hội thoại của agent vào Postgres
-sqlglot>=25.0                    # phân tích câu SQL để chỉ cho phép SELECT
+psycopg[binary,pool]>=3.2           # driver Postgres (async)
+psycopg-pool>=3.2                   # connection pool (cần >= 3.2 cho check_connection)
+langgraph-checkpoint-postgres>=2.0  # lưu hội thoại của agent vào Postgres (khi có CHECKPOINT_DATABASE_URL)
+sqlglot>=25.0                       # phân tích câu SQL để chỉ cho phép SELECT
