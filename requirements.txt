@@ -15,3 +15,13 @@ psycopg[binary,pool]>=3.2           # driver Postgres (async)
 psycopg-pool>=3.2                   # connection pool (cần >= 3.2 cho check_connection)
 langgraph-checkpoint-postgres>=2.0  # lưu hội thoại của agent vào Postgres (khi có CHECKPOINT_DATABASE_URL)
 sqlglot>=25.0                       # phân tích câu SQL để chỉ cho phép SELECT
+
+# --- Telegram (bước 1) ---
+aiogram>=3.13                       # bot Telegram bất đồng bộ, dùng long polling
+
+# --- Cấu hình bằng file (bước 1 và 3) ---
+pyyaml>=6.0                         # đọc config/allowlist.yaml, thresholds.yaml, targets.yaml, calendar.yaml
+
+# --- Phân tích và biểu đồ (bước 6, có thể thêm sau) ---
+pandas>=2.2                         # analysis_tools: so sánh kỳ, Pareto, cohort, RFM
+matplotlib>=3.9                     # chart_tools: biểu đồ nhanh dạng ảnh PNG

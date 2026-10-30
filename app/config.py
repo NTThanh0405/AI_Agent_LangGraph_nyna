@@ -1,13 +1,15 @@
 # app/config.py
 # Cấu hình toàn bộ dịch vụ, đọc từ biến môi trường / file .env: khoá API, tham số LLM,
-# kết nối PostgreSQL chỉ-đọc (kèm schema mặc định), dashboard và lưu hội thoại.
-# Biến bắt buộc mà thiếu (hoặc khoá service quá ngắn) thì app báo lỗi ngay khi khởi động.
+# bot Telegram (allowlist, rate limit, phiên), kết nối PostgreSQL chỉ-đọc (kèm schema
+# mặc định), dashboard và lưu hội thoại.
+# Biến bắt buộc mà thiếu (hoặc cấu hình sai) thì app báo lỗi ngay khi khởi động.
 
 from functools import lru_cache
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,14 +22,26 @@ class Settings(BaseSettings):
 
     app_name: str = "langgraph-service"
     app_env: str = "production"  # đặt APP_ENV=development khi chạy local để bật /docs
+    timezone: str = "Asia/Ho_Chi_Minh"  # múi giờ để tính "hôm nay", "tuần này", "tháng này"
 
     anthropic_api_key: SecretStr
-    service_api_key: SecretStr  # khoá n8n gửi kèm ở header x-api-key, tối thiểu 32 ký tự
+    telegram_bot_token: SecretStr  # token từ @BotFather
+
+    # Không còn n8n gọi vào agent nên không bắt buộc. Chỉ đặt nếu bạn mở lại endpoint
+    # nội bộ bảo vệ bằng header x-api-key (app/api/deps.py). Nếu đặt thì tối thiểu 32 ký tự.
+    service_api_key: Optional[SecretStr] = None
 
     model_name: str = "claude-sonnet-5-5"
     temperature: float = 0.0
     max_tokens: int = 4096  # create_dashboard nhiều biểu đồ cần chỗ cho JSON của tool call
     llm_timeout: int = 60
+    graph_max_steps: int = 12  # số bước tối đa của vòng chat <-> tools trong một lượt hỏi
+
+    # ---- Telegram bot ----
+    allowlist_path: str = "config/allowlist.yaml"  # ai được dùng bot và vai trò của họ
+    rate_limit_per_min: int = 5      # số câu hỏi tối đa mỗi phút cho mỗi người
+    rate_limit_per_day: int = 100    # số câu hỏi tối đa mỗi ngày cho mỗi người
+    session_ttl_minutes: int = 60    # im lặng quá thời gian này thì xoá hội thoại (sessions.py)
 
     db_host: str = "localhost"
     db_port: int = 5432
@@ -41,6 +55,10 @@ class Settings(BaseSettings):
     db_statement_timeout_ms: int = 15000
     db_max_rows: int = 200
 
+    # ---- Dashboard ----
+    # "file": bot gửi file HTML qua Telegram. "link": ghi file vào dashboard_dir,
+    # nginx phục vụ và bot gửi link (cần dashboard_base_url).
+    delivery_mode: Literal["file", "link"] = "file"
     dashboard_dir: str = "/data/dashboards"
     dashboard_base_url: str = ""
     dashboard_ttl_hours: int = 24
@@ -52,9 +70,18 @@ class Settings(BaseSettings):
 
     @field_validator("service_api_key")
     @classmethod
-    def _service_key_long_enough(cls, v: SecretStr) -> SecretStr:
-        if len(v.get_secret_value()) < 32:
+    def _service_key_long_enough(cls, v: Optional[SecretStr]) -> Optional[SecretStr]:
+        if v is not None and len(v.get_secret_value()) < 32:
             raise ValueError("SERVICE_API_KEY phải dài ít nhất 32 ký tự")
+        return v
+
+    @field_validator("timezone")
+    @classmethod
+    def _timezone_is_valid(cls, v: str) -> str:
+        try:
+            ZoneInfo(v)
+        except Exception as e:  # ZoneInfoNotFoundError, ValueError...
+            raise ValueError(f"TIMEZONE không hợp lệ: {v!r}") from e
         return v
 
     @field_validator("db_schema")
@@ -64,6 +91,12 @@ class Settings(BaseSettings):
         if not v.isidentifier():
             raise ValueError("DB_SCHEMA chỉ được gồm chữ, số, dấu gạch dưới")
         return v
+
+    @model_validator(mode="after")
+    def _link_mode_needs_base_url(self) -> "Settings":
+        if self.delivery_mode == "link" and not self.dashboard_base_url:
+            raise ValueError("DELIVERY_MODE=link cần đặt DASHBOARD_BASE_URL")
+        return self
 
     @property
     def database_url(self) -> str:

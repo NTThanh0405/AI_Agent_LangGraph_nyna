@@ -1,0 +1,13 @@
+# config/allowlist.yaml
+# Ai được dùng bot và vai trò của họ. Telegram ID không có trong danh sách sẽ bị bỏ qua.
+# Vai trò phải có trong ROLE_TABLES của app/agent/permissions.py (ví dụ: boss, manager).
+# Lấy Telegram ID bằng cách nhắn cho @userinfobot.
+# Sửa file này rồi restart agent (docker compose restart agent) để áp dụng.
+
+users:
+  - telegram_id: 111111111      # ĐỔI thành Telegram ID thật
+    role: boss
+    name: Anh A
+  - telegram_id: 222222222      # ĐỔI thành Telegram ID thật
+    role: manager
+    name: Chị B
