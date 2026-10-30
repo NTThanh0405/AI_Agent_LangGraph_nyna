@@ -1,201 +1,206 @@
-# AI Agent LangGraph – Trợ lý phân tích dữ liệu nội bộ (Nyna)
+# langgraph-service
 
-Trợ lý AI trả lời câu hỏi về số liệu kinh doanh ngay trên **Telegram**. Người dùng hỏi bằng tiếng Việt, agent tự đọc cấu trúc database, viết câu `SELECT`, chạy trên **PostgreSQL nội bộ (chỉ-đọc)** rồi trả lời kèm số liệu thật. Mỗi vai trò (`boss`, `manager`...) chỉ được xem những bảng được phân quyền.
+Trợ lý phân tích dữ liệu kinh doanh chạy trên **Telegram**, xây bằng **LangGraph + Claude + PostgreSQL**.
+
+Sếp (hoặc quản lý) nhắn tin cho bot, ví dụ *"cho tôi dashboard doanh thu tuần này"*, *"tình hình kinh doanh tháng này thế nào?"*, *"có đề xuất gì không?"*. Agent truy vấn database nội bộ (chỉ đọc), phân tích như một data analyst, rồi trả lời kèm số liệu, biểu đồ, dashboard HTML và đề xuất.
+
+> Agent **chỉ làm việc khi có yêu cầu**. Không có báo cáo hay cảnh báo tự động theo lịch.
+
+---
+
+## Tính năng
+
+- **Chat qua Telegram** bằng long polling, không cần mở port hay webhook công khai.
+- **Hiểu thời gian đúng**: "tuần này", "tháng này", "7 ngày qua" được tính bằng code (`periods.py`), không để LLM tự đoán ngày.
+- **Số liệu ổn định**: các chỉ số quen thuộc (doanh thu, số đơn, giá trị đơn trung bình, khách mới/quay lại, tỉ lệ huỷ, top sản phẩm, theo kênh) dùng SQL viết sẵn, so với kỳ trước và cùng kỳ. LLM chỉ diễn giải.
+- **Câu hỏi tự do**: agent tự khám phá schema và viết SQL `SELECT` cho câu hỏi ngoài các mẫu có sẵn.
+- **Dashboard HTML** (Chart.js) với bố cục cố định, gửi dạng file hoặc link.
+- **Đề xuất bám số liệu**: kết hợp snapshot, mục tiêu, lịch khuyến mãi và ngưỡng cảnh báo.
+- **Phân quyền theo vai trò**: Telegram ID tra allowlist ra role, mỗi role có tài khoản PostgreSQL riêng.
+- **An toàn**: chỉ `SELECT`, guard bằng sqlglot, `statement_timeout`, giới hạn số dòng, rate limit, audit log.
+
+---
 
 ## Kiến trúc
 
 ```
-Telegram ──► Cloudflare Tunnel ──► n8n ──► Agent (FastAPI + LangGraph) ──► Claude (Anthropic)
-                                    │                │
-                                    │                └──► PostgreSQL nội bộ (role chỉ-đọc)
-                                    └─ xác định user_role từ Telegram user id
+Telegram (sếp / quản lý)
+      │  long polling
+      ▼
+┌──────────────────── container: agent (1 worker) ────────────────────┐
+│ telegram/bot → auth (allowlist → role) → ratelimit → lock theo chat │
+│      │  gửi ngay "Đang phân tích, khoảng 1 phút..."                 │
+│      ▼                                                              │
+│ LangGraph: chat ◄──► tools                                          │
+│   ├─ resolve_period       tính khoảng thời gian bằng code           │
+│   ├─ business_snapshot    KPI cố định + % thay đổi + cờ vượt ngưỡng │
+│   ├─ create_dashboard     preset bố cục cố định                     │
+│   ├─ list_tables / describe_table / run_select_query                │
+│   ├─ get_sample_rows / profile_column                               │
+│   ├─ analysis / chart                                               │
+│   └─ get_business_context mục tiêu, khuyến mãi, ngưỡng              │
+│      │                                                              │
+│      ▼  guard + permissions + pool theo role                        │
+│ PostgreSQL (schema dwh, role chỉ-đọc riêng cho từng vai trò)        │
+│      ▼                                                              │
+│ formatter → text + ảnh + file/link dashboard + tóm tắt 3-4 dòng     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-| Thành phần | Vai trò |
+### Nguyên tắc thiết kế
+
+1. **Số liệu do code tính, LLM chỉ diễn giải.** Khoảng thời gian, KPI, so sánh kỳ trước đều do code và SQL cố định tính.
+2. **Câu hỏi quen thuộc đi đường cố định, câu hỏi lạ đi đường tự do.**
+3. **Không hỏi ngược.** Agent chọn cách hiểu hợp lý nhất và nêu giả định ở cuối câu trả lời.
+4. **Quyền do server quyết định**, không tin gì từ nội dung tin nhắn.
+
+---
+
+## Ví dụ sử dụng
+
+| Nhắn cho bot | Agent làm |
 |---|---|
-| **cloudflared** | Cloudflare Tunnel đưa n8n ra Internet qua HTTPS, không cần mở port. |
-| **n8n** | Nhận tin nhắn Telegram, kiểm tra người dùng được phép, ánh xạ Telegram user id → `user_role`, gọi agent và gửi câu trả lời lại. |
-| **agent** | Dịch vụ FastAPI chạy graph LangGraph. Không mở port ra ngoài, chỉ n8n gọi được qua `http://agent:8000`. |
-| **Claude** | Model suy luận, quyết định gọi tool nào (model mặc định: `claude-sonnet-5-5`, đổi qua `MODEL_NAME`). |
-| **PostgreSQL** | Nguồn dữ liệu phân tích (đọc bằng `agent_readonly`) và nơi lưu hội thoại (ghi bằng `agent_checkpoint`). |
+| "Dashboard doanh thu tuần này" | `resolve_period` → `create_dashboard(revenue_weekly)` → gửi dashboard kèm tóm tắt 3-4 dòng |
+| "Tình hình kinh doanh tháng này?" | `resolve_period` → `business_snapshot` → drill-down nếu có cờ ⚠️ → trả lời theo khuôn analyst |
+| "Có đề xuất gì?" | Dựa trên snapshot + `business_context.md` + `calendar.yaml`, mỗi đề xuất có bằng chứng số liệu và mức ưu tiên |
 
-### Luồng xử lý của agent (vòng lặp ReAct)
+**Khuôn trả lời:** Kết luận → Số liệu chính → Nguyên nhân khả dĩ → Đề xuất → Giả định và giới hạn.
 
-```
-START ─► chat ─┬─ có gọi tool ─► tools ─► chat ─► ...
-               └─ không ─────────────────────────► END
-```
+**Quy ước thời gian:**
+- *Tuần này*: từ thứ Hai đến hôm nay, so với cùng số ngày của tuần trước.
+- *Tháng này*: từ ngày 1 đến hôm nay, so với cùng số ngày của tháng trước.
 
-1. Node `chat` gọi Claude với system prompt + vai trò người hỏi + lịch sử hội thoại.
-2. Nếu Claude yêu cầu tool, node `tools` chạy tool rồi trả kết quả về `chat`.
-3. Lặp tới khi Claude trả lời xong. Tối đa `MAX_GRAPH_STEPS = 12` bước mỗi lượt hỏi để chặn vòng lặp vô hạn.
+### Lệnh Telegram
 
-### Các tool của agent (`app/agent/tools/sql_tools.py`)
-
-| Tool | Chức năng |
+| Lệnh | Tác dụng |
 |---|---|
-| `list_tables` | Liệt kê bảng/view mà vai trò hiện tại được xem. |
-| `describe_table` | Xem cột, kiểu dữ liệu, cho phép NULL hay không của một bảng. |
-| `run_select_query` | Chạy **một** câu `SELECT`, trả kết quả dạng bảng chữ (tối đa `DB_MAX_ROWS` dòng, ô dài bị cắt ở 200 ký tự). |
+| `/start`, `/help` | Giới thiệu và hướng dẫn |
+| `/new` | Bắt đầu hội thoại mới (xoá ngữ cảnh) |
+| `/tuan` | Tình hình kinh doanh tuần này |
+| `/thang` | Tình hình kinh doanh tháng này |
+| `/dashboard` | Dashboard doanh thu mặc định |
 
-Lỗi của tool được trả về dạng chữ để Claude tự sửa câu SQL.
+Phiên hội thoại tự hết hạn sau 60 phút im lặng.
 
-## Các lớp bảo mật
-
-1. **`x-api-key`** (`app/api/deps.py`): mọi endpoint `/agent/*` yêu cầu header khớp `SERVICE_API_KEY` (so sánh bằng `secrets.compare_digest`). Chỉ n8n giữ khoá này.
-2. **Role PostgreSQL chỉ-đọc** (`sql/create_readonly_role.sql`) – *lớp bảo vệ chính*: chỉ `GRANT SELECT` trên các bảng được phép, `default_transaction_read_only = on`, `statement_timeout = 15s`.
-3. **Ép read-only phía kết nối** (`app/db/pool.py`): mỗi kết nối trong pool đều set `statement_timeout` và `default_transaction_read_only`.
-4. **SQL guard** (`app/db/guard.py`, dùng `sqlglot`) – *lớp phụ*: chỉ một câu `SELECT`/`UNION`; chặn lệnh ghi/DDL, hàm nguy hiểm (`pg_*`, `lo_*`, `dblink`, `set_config`, `*_to_xml`...), bảng hệ thống và truy vấn chéo database; tự bọc `LIMIT`.
-5. **Phân quyền theo vai trò** (`app/agent/permissions.py`): `ROLE_TABLES` quy định vai trò nào được xem bảng nào (`*`, `schema.*` hoặc `schema.table`). Vai trò lạ/trống không xem được bảng nào.
-6. **Tách hội thoại theo người dùng**: thread nội bộ là `"{user_id}:{thread_id}"`, nên đoán được `thread_id` cũng không đọc được hội thoại của người khác.
-7. **`user_role` đi qua `config["configurable"]`**, không nằm trong nội dung chat, nên LLM không tự đổi được vai trò.
-8. **Production** (`APP_ENV=production`) tắt `/docs` và `/openapi.json`. Container chạy bằng user không phải root.
-
-> **Lưu ý:** `user_role` do n8n gửi lên, nên n8n phải tự xác định vai trò từ Telegram user id (danh sách cho phép), không lấy từ nội dung người dùng gõ.
+---
 
 ## Cấu trúc thư mục
 
 ```
-=======
-.
 langgraph-service/
 ├── app/
-│   ├── main.py                 # Khởi động FastAPI, mở pool + checkpointer, compile graph
-│   ├── config.py               # Cấu hình từ biến môi trường / .env
+│   ├── main.py                  # lifespan: pool theo role, checkpointer, graph, bot polling, dọn nền
+│   ├── config.py                # cấu hình từ .env
+│   ├── audit.py                 # ghi log: user, câu hỏi, tool, SQL, số dòng, thời gian, token
+│   ├── api/                     # FastAPI: chỉ còn health check
+│   │   ├── deps.py
+│   │   └── v1/ (router.py, health.py)
+│   ├── telegram/
+│   │   ├── bot.py               # long polling, chống trùng update_id
+│   │   ├── handlers.py          # lệnh và tin nhắn thường
+│   │   ├── progress.py          # thông báo "đang phân tích..."
+│   │   ├── auth.py              # Telegram ID → role
+│   │   ├── ratelimit.py
+│   │   └── formatter.py         # cắt tin 4096 ký tự, escape, gửi ảnh/file
 │   ├── agent/
-│   │   ├── graph.py            # Dựng graph chat <-> tools
-│   │   ├── state.py            # AgentState: messages, user_id, user_role
-│   │   ├── permissions.py      # Phân quyền bảng theo vai trò
-│   │   ├── nodes/chat.py       # Node gọi Claude + system prompt
-│   │   └── tools/              # list_tables, describe_table, run_select_query
-│   ├── api/
-│   │   ├── deps.py             # Xác thực x-api-key
-│   │   └── v1/                 # router, agent_route (invoke), health
+│   │   ├── state.py
+│   │   ├── graph.py             # vòng lặp chat ↔ tools
+│   │   ├── sessions.py          # phiên 60 phút, dọn nền, reset
+│   │   ├── permissions.py       # vai trò → bảng/cột
+│   │   ├── prompts.py           # prompt analyst, quy ước thời gian, khuôn trả lời
+│   │   ├── periods.py           # "tuần này" → (từ, đến, kỳ trước, cùng kỳ năm trước)
+│   │   ├── knowledge/           # glossary.md, sql_examples.md, business_context.md, calendar.yaml
+│   │   ├── queries/             # SQL cố định, tham số hoá (kpi, theo ngày, theo kênh, top sản phẩm...)
+│   │   ├── nodes/chat.py        # gọi Claude
+│   │   └── tools/               # sql, explore, period, snapshot, context, analysis, chart, dashboard
 │   ├── db/
-=======
-│   │   ├── __init__.py
-│   │   ├── pool.py                # connection pool PostgreSQL (chỉ-đọc)
-│   │   └── guard.py               # chỉ cho phép SELECT, chặn lệnh nguy hiểm
-│   └── schemas/
-│       ├── __init__.py
-│       ├── request.py
-│       └── response.py
-├── sql/
-│   └── create_readonly_role.sql   # tạo role agent_readonly (chỉ đọc schema dwh, che cột cá nhân)
-├── .env                           # giá trị thật, không commit
-├── .gitignore
-├── Dockerfile                     # image agent, có thư mục /data/dashboards cho appuser
-├── docker-compose.yml             # agent + n8n + cloudflared + dashboards-web (nginx)
-├── nginx-dash.conf                # nginx chỉ phục vụ file dashboard tên ngẫu nhiên
+│   │   ├── pool.py              # mỗi role một connection pool
+│   │   └── guard.py             # chỉ cho một câu SELECT, chặn hàm/bảng nguy hiểm
+│   └── schemas/                 # request.py, response.py
+├── config/
+│   ├── allowlist.yaml           # telegram_id → role, tên hiển thị
+│   ├── thresholds.yaml          # ngưỡng gắn cờ trong snapshot
+│   └── targets.yaml             # mục tiêu doanh thu tuần/tháng
+├── sql/create_roles.sql         # tạo role PostgreSQL theo vai trò
+├── tests/                       # unit test + tests/eval (bộ câu hỏi hồi quy)
+├── nginx-dash.conf              # chỉ dùng khi gửi dashboard bằng link
+├── Dockerfile
+├── docker-compose.yml
 ├── requirements.txt
-└── README.md
+└── .env                         # giá trị thật, KHÔNG commit
 ```
 
-## API
+---
 
-Tiền tố `/api/v1`.
+## Yêu cầu
 
-| Method | Đường dẫn | Cần `x-api-key` | Mô tả |
-|---|---|---|---|
-| `GET` | `/health` | Không | App còn sống (dùng cho Docker HEALTHCHECK). |
-| `GET` | `/health/db` | Không | Kiểm tra kết nối PostgreSQL (`SELECT 1`). |
-| `POST` | `/agent/invoke` | Có | Gửi câu hỏi cho agent. |
+- Docker và Docker Compose
+- PostgreSQL (có thể nằm trên máy host hoặc máy khác)
+- Telegram Bot Token (tạo qua [@BotFather](https://t.me/BotFather))
+- Anthropic API key
+- (Chỉ khi gửi dashboard bằng link) Cloudflare Tunnel token và một tên miền
 
-**Request `POST /api/v1/agent/invoke`**
+---
 
-```json
-{
-  "message": "Doanh thu tuần này theo sản phẩm?",
-  "thread_id": "optional-conversation-id",
-  "user_id": "123456789",
-  "user_role": "manager"
-}
+## Cài đặt
+
+### 1. Clone và tạo file `.env`
+
+```bash
+git clone <repo-url>
+cd langgraph-service
+cp .env.example .env     # rồi điền giá trị thật
 ```
 
-| Trường | Bắt buộc | Mô tả |
-|---|---|---|
-| `message` | Có | Câu hỏi (1–4096 ký tự). |
-| `thread_id` | Không | ID hội thoại. Bỏ trống để tạo hội thoại mới. |
-| `user_id` | Không\* | Telegram user id, dùng cho log và tách hội thoại. |
-| `user_role` | Không\* | `boss`, `manager`... Thiếu hoặc lạ thì không xem được bảng nào. |
+### 2. Tạo role PostgreSQL
 
-\* Nên luôn gửi cả hai từ n8n.
+Chỉnh tên database, mật khẩu và danh sách bảng trong `sql/create_roles.sql`, rồi chạy bằng tài khoản admin:
 
-**Response**
-
-```json
-{
-  "answer": "Tuần này doanh thu ...",
-  "thread_id": "uuid-hoặc-thread_id-bạn-gửi"
-}
+```bash
+psql -h <host> -U postgres -d <your_db> -f sql/create_roles.sql
 ```
 
-Lỗi: `401` sai/thiếu API key; `500` agent lỗi hoặc câu hỏi quá phức tạp (vượt giới hạn bước).
+Script tạo:
 
-## Cài đặt và chạy
+| Role | Quyền |
+|---|---|
+| `agent_boss_ro` | Chỉ đọc, các bảng dành cho vai trò boss |
+| `agent_manager_ro` | Chỉ đọc, giới hạn bảng/cột/view cho manager |
+| `agent_checkpoint` | Chỉ ghi trong schema `agent_state` (lưu hội thoại, nếu dùng PostgresSaver) |
 
-### 1. Chuẩn bị PostgreSQL
+> Phân quyền được thực thi **ở cả hai lớp**: `permissions.py` (trong code) và `GRANT` (trong Postgres). Hai nơi phải khớp nhau. Cột nhạy cảm (giá vốn, lương, SĐT) nên được che bằng view hoặc cấp quyền theo cột.
 
-Chạy `sql/create_readonly_role.sql` bằng tài khoản admin, sau khi sửa:
+### 3. Khai báo người dùng
 
-- `your_db` → tên database thật
-- `DOI_MAT_KHAU_1`, `DOI_MAT_KHAU_2` → mật khẩu mạnh
-- danh sách bảng trong `GRANT SELECT ...` → đúng những bảng agent được đọc
+`config/allowlist.yaml`:
 
-Script tạo hai tài khoản: `agent_readonly` (chỉ đọc dữ liệu phân tích) và `agent_checkpoint` (chỉ ghi trong schema `agent_state` để lưu hội thoại).
-
-### 2. Phân quyền theo vai trò
-
-Sửa `ROLE_TABLES` trong `app/agent/permissions.py` cho khớp database thật. **Danh sách này phải đồng bộ với các `GRANT SELECT` ở bước 1**: app lọc theo `ROLE_TABLES`, còn DB chỉ cho đọc những bảng đã `GRANT`.
-
-### 3. Tạo file `.env` (không commit)
-
-```env
-=======
-# ===== Ứng dụng =====
-APP_NAME=langgraph-service
-# "production" sẽ tắt trang /docs
-APP_ENV=production
-LOG_LEVEL=INFO
-
-# ===== LLM =====
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxx
->>>>>>> 0b899d4da8097a1b2d7660a21326605edc635c47
-MODEL_NAME=claude-sonnet-5-5
-TEMPERATURE=0
-MAX_TOKENS=2048
-LLM_TIMEOUT=60
-
-=======
-
-# ===== Bảo mật =====
-# n8n gửi key này trong header X-API-Key
-# Tạo key mới bằng: openssl rand -hex 32
-SERVICE_API_KEY=dan_key_moi_vao_day
-
-# ===== n8n =====
-# Tạo bằng: openssl rand -hex 32. PHẢI sao lưu, mất khoá là không giải mã được credential đã lưu
-N8N_ENCRYPTION_KEY=dan_key_ngau_nhien_vao_day
-
-# ===== PostgreSQL (role chỉ-đọc cho agent truy vấn) =====
-# DB trên chính máy host: host.docker.internal
-# DB ở máy khác: IP hoặc hostname của máy đó
-DB_HOST=host.docker.internal
-DB_PORT=5432
-DB_NAME=NAME DB
-DB_USER=agent_readonly
-DB_PASSWORD=MAT KHAU
-
-# ===== Cloudflare Tunnel =====
-# Zero Trust > Networks > Tunnels > tunnel của bạn > copy token
-CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi...
+```yaml
+users:
+  - telegram_id: 123456789
+    role: boss
+    name: Anh A
+  - telegram_id: 987654321
+    role: manager
+    name: Chị B
 ```
 
-> Nếu mật khẩu trong `CHECKPOINT_DATABASE_URL` có ký tự đặc biệt (`@`, `:`, `/`), hãy mã hoá URL ký tự đó.
+Telegram ID không có trong danh sách sẽ bị bỏ qua. Bot chỉ nhận chat riêng, không nhận group.
 
-### 4. Cấu hình `docker-compose.yml`
+Lấy Telegram ID bằng cách nhắn cho [@userinfobot](https://t.me/userinfobot).
 
-Đổi `N8N_HOST` và `WEBHOOK_URL` từ `n8n.tenmiencuaban.com` thành tên miền thật. Trong Cloudflare Zero Trust, tạo Tunnel và trỏ hostname công khai tới `http://n8n:5678`, rồi lấy token đặt vào `CLOUDFLARE_TUNNEL_TOKEN`.
+### 4. Điền tri thức nghiệp vụ
+
+Chất lượng phân tích phụ thuộc phần này nhiều nhất:
+
+| File | Nội dung |
+|---|---|
+| `app/agent/knowledge/glossary.md` | Bảng, cột, grain, khoá join. Doanh thu tính trước hay sau giảm giá, có trừ đơn huỷ không, múi giờ, tiền tệ |
+| `app/agent/knowledge/sql_examples.md` | Cặp "câu hỏi → SQL chuẩn" cho các chỉ số quan trọng |
+| `app/agent/knowledge/business_context.md` | Mục tiêu, mùa vụ, quy tắc đề xuất |
+| `app/agent/knowledge/calendar.yaml` | Khuyến mãi, ngày lễ, sự kiện (để so sánh công bằng) |
+| `config/thresholds.yaml` | Ngưỡng cảnh báo, ví dụ doanh thu giảm trên 10% so với kỳ trước |
+| `config/targets.yaml` | Mục tiêu doanh thu tuần/tháng (VND) |
+| `app/agent/queries/*.sql` | SQL cố định cho KPI, viết theo schema thật của bạn |
 
 ### 5. Chạy
 
@@ -204,61 +209,150 @@ docker compose up -d --build
 docker compose logs -f agent
 ```
 
-Kiểm tra từ trong mạng docker (agent không mở port ra ngoài):
+Kiểm tra: nhắn `/start` cho bot từ tài khoản có trong allowlist.
 
-```bash
-docker compose exec agent python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/api/v1/health/db').read())"
+---
+
+## Biến môi trường
+
+```env
+# LLM
+ANTHROPIC_API_KEY=
+MODEL_NAME=claude-sonnet-5-5
+MAX_TOKENS=4096
+
+# Telegram
+TELEGRAM_BOT_TOKEN=
+
+# PostgreSQL (mỗi vai trò một role riêng)
+DB_HOST=host.docker.internal
+DB_PORT=5432
+DB_NAME=
+DB_BOSS_USER=agent_boss_ro
+DB_BOSS_PASSWORD=
+DB_MANAGER_USER=agent_manager_ro
+DB_MANAGER_PASSWORD=
+DB_STATEMENT_TIMEOUT_MS=15000
+DB_MAX_ROWS=200
+
+# Lưu hội thoại và audit (bỏ trống CHECKPOINT_DATABASE_URL thì dùng RAM, mất khi restart)
+CHECKPOINT_DATABASE_URL=
+AUDIT_DATABASE_URL=
+
+# Vận hành
+TIMEZONE=Asia/Ho_Chi_Minh
+RATE_LIMIT_PER_MIN=5
+RATE_LIMIT_PER_DAY=100
+SESSION_TTL_MINUTES=60
+APP_ENV=production
+LOG_LEVEL=INFO
+
+# Gửi dashboard: file (gửi qua Telegram) hoặc link (nginx + Cloudflare)
+DELIVERY_MODE=file
+DASHBOARD_BASE_URL=
+DASHBOARD_TTL_HOURS=24
+CLOUDFLARE_TUNNEL_TOKEN=
 ```
 
-Khi khởi động, log sẽ báo hội thoại đang lưu trong PostgreSQL hay trong RAM.
+---
 
-### 6. Dựng workflow n8n
+## Cách gửi dashboard
 
-
-=======
-=======
-Mở n8n qua tên miền đã cấu hình và tạo workflow:
-
-1. **Telegram Trigger** nhận tin nhắn.
-2. Kiểm tra Telegram user id có trong danh sách cho phép; nếu không thì từ chối.
-3. Ánh xạ user id → `user_role` (ví dụ `boss`, `manager`).
-4. **HTTP Request** `POST http://agent:8000/api/v1/agent/invoke`, header `x-api-key: <SERVICE_API_KEY>`, body gồm `message`, `thread_id` (ví dụ Telegram chat id), `user_id`, `user_role`.
-5. Gửi `answer` về lại Telegram.
-
-## Cấu hình chính
-
-| Biến | Mặc định | Ý nghĩa |
+| | `file` (mặc định) | `link` |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | – | Khoá gọi Claude (bắt buộc). |
-| `SERVICE_API_KEY` | – | Khoá n8n gửi kèm trong `x-api-key` (bắt buộc). |
-| `APP_ENV` | `development` | `production` tắt trang `/docs`. |
-| `MODEL_NAME` | `claude-sonnet-5-5` | Model Claude sử dụng. |
-| `TEMPERATURE` | `0` | Giữ 0 để số liệu ổn định. |
-| `MAX_TOKENS` | `2048` | Giới hạn độ dài câu trả lời. |
-| `DB_HOST` / `DB_PORT` / `DB_NAME` | `localhost` / `5432` / `postgres` | Kết nối DB phân tích. |
-| `DB_USER` / `DB_PASSWORD` | `agent_readonly` / rỗng | Tài khoản chỉ-đọc. |
-| `DB_POOL_MIN` / `DB_POOL_MAX` | `1` / `5` | Kích thước connection pool. |
-| `DB_STATEMENT_TIMEOUT_MS` | `15000` | Tự huỷ câu SQL chạy quá lâu. |
-| `DB_MAX_ROWS` | `200` | Số dòng tối đa trả về cho Claude. |
-| `CHECKPOINT_DATABASE_URL` | trống | Chuỗi kết nối lưu hội thoại. Trống = dùng RAM. |
-| `LOG_LEVEL` | `INFO` | Mức log. |
+| Cách hoạt động | Bot gửi file HTML qua Telegram (Chart.js nhúng inline, mở offline được) | Ghi file tên ngẫu nhiên, nginx phục vụ, Cloudflare Tunnel đưa ra HTTPS |
+| Service cần chạy | `agent` | `agent` + `dashboards-web` + `cloudflared` |
+| Bảo mật | Không có URL công khai | Ai có link đều xem được, nên đặt hạn ngắn |
+| Tiện dùng | Phải tải về rồi mở | Bấm là xem |
 
-## Chạy local để phát triển
+Với chế độ `link`: tên file dùng `secrets.token_urlsafe(32)`, tự xoá sau `DASHBOARD_TTL_HOURS`, nginx tắt `autoindex`, thêm `X-Robots-Tag: noindex` và CSP (xem `nginx-dash.conf`).
+
+---
+
+## Bảo mật
+
+| Lớp | Biện pháp |
+|---|---|
+| Danh tính | Allowlist Telegram ID ở server; role không bao giờ lấy từ nội dung tin nhắn |
+| Phân quyền | `permissions.py` + role PostgreSQL riêng cho từng vai trò + view che cột nhạy cảm |
+| SQL | `guard.py` chỉ cho một câu `SELECT`, chặn hàm nguy hiểm (`pg_*`, `set_config`...) và bảng hệ thống; kết nối `read_only`; `statement_timeout`; giới hạn số dòng |
+| Dữ liệu là dữ liệu | Nội dung ô trong DB không được coi là chỉ thị (chống prompt injection) |
+| Dashboard | Escape dữ liệu nhúng, Chart.js pin phiên bản hoặc inline, preset cũng đi qua cùng guard và quyền |
+| Chi phí | Rate limit theo phút/ngày, `recursion_limit`, trim lịch sử, audit token theo user |
+| Triển khai | Agent không mở port ra ngoài, container chạy bằng user không phải root |
+
+**Lưu ý vận hành:**
+- Chạy **1 worker** vì phiên hội thoại nằm trong RAM. Nếu cần nhiều worker, đặt `CHECKPOINT_DATABASE_URL` để dùng `AsyncPostgresSaver`.
+- Không commit `.env`. Đổi toàn bộ mật khẩu mẫu trong `sql/create_roles.sql` trước khi chạy.
+
+---
+
+## Kiểm thử
+
+```bash
+pip install -r requirements.txt pytest
+pytest tests/
+```
+
+| Test | Kiểm tra |
+|---|---|
+| `test_guard.py` | Các câu SQL tấn công: nhiều câu lệnh, `pg_sleep`, `SELECT INTO`, CTE ghi, truy vấn chéo database |
+| `test_permissions.py` | Vai trò nào xem được bảng nào |
+| `test_periods.py` | "Tuần này/tháng này" ở các ngày biên, đổi tháng, đổi năm |
+| `test_snapshot.py` | SQL cố định chạy đúng trên dữ liệu mẫu |
+| `test_auth_ratelimit.py` | Allowlist và giới hạn tần suất |
+| `test_formatter.py` | Cắt tin, escape |
+
+**Eval hồi quy:** `tests/eval/questions.yaml` gồm 20-30 câu hỏi mẫu kèm đáp án kỳ vọng. Chạy lại mỗi khi sửa prompt hoặc tool:
+
+```bash
+python tests/eval/run_eval.py
+```
+
+---
+
+## Phát triển cục bộ
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env             # hoặc tự tạo .env như trên, DB_HOST=localhost
-uvicorn app.main:app --reload --port 8000
+cp .env.example .env
+python -m app.main
 ```
 
-Ở chế độ `development`, xem tài liệu API tại `http://localhost:8000/docs`.
+Khi `APP_ENV=development`, trang `/docs` của FastAPI được bật. Ở `production` thì tắt.
 
-## Hạn chế đã biết / việc cần làm
+---
 
-- Chưa có test tự động (nên ưu tiên test cho `app/db/guard.py` và `app/agent/permissions.py`).
-- Lịch sử hội thoại chưa được cắt gọn, hội thoại dài sẽ tốn token.
-- Mọi vai trò dùng chung một tài khoản DB, nên chưa che cột nhạy cảm theo vai trò (muốn che thì dùng view hoặc `GRANT SELECT (cột...)`).
-- Workflow n8n chưa được lưu trong repo.
-- Chưa có giới hạn tần suất (rate limit) theo `user_id`.
+## Xử lý sự cố
+
+| Triệu chứng | Nguyên nhân thường gặp |
+|---|---|
+| Bot không phản hồi | Sai `TELEGRAM_BOT_TOKEN`, hoặc Telegram ID chưa có trong `allowlist.yaml` |
+| Container agent unhealthy | Xem `docker compose logs agent`; thường do không kết nối được DB (`DB_HOST`, mật khẩu, `pg_hba.conf`) |
+| Không kết nối được Postgres trên máy host | Đặt `DB_HOST=host.docker.internal` và kiểm tra `listen_addresses` cùng `pg_hba.conf` |
+| "Không có quyền truy cập các bảng..." | `permissions.py` và `GRANT` trong Postgres chưa khớp |
+| Truy vấn bị huỷ vì quá lâu | Thu hẹp khoảng thời gian, hoặc tăng `DB_STATEMENT_TIMEOUT_MS` có cân nhắc |
+| Mất hội thoại sau khi restart | Chưa đặt `CHECKPOINT_DATABASE_URL` nên đang dùng RAM |
+| Số liệu lệch so với báo cáo cũ | Kiểm tra định nghĩa doanh thu trong `glossary.md` và múi giờ của dữ liệu |
+| Câu trả lời bị cắt ngang | Tăng `MAX_TOKENS` |
+
+---
+
+## Trạng thái triển khai
+
+- [ ] **Giai đoạn 1:** `telegram/` (polling, allowlist, `/new`, cắt tin, progress); 
+- [ ] **Giai đoạn 2:** `periods.py` + test, `glossary.md`, `prompts.py`, `explore_tools`
+- [ ] **Giai đoạn 3:** `queries/*.sql`, `business_snapshot`, `business_context.md`, `thresholds/targets.yaml`
+- [ ] **Giai đoạn 4:** `dashboard_presets.py`, chọn cách gửi `file` hay `link`
+- [ ] **Giai đoạn 5:** tách role PostgreSQL, `audit.py`, test, eval
+- [ ] **Giai đoạn 6 (tuỳ chọn):** `analysis_tools` (cohort, RFM, anomaly), `chart_tools`, trim lịch sử, prompt caching
+
+---
+
+## Công nghệ
+
+Python 3.11 · FastAPI · LangGraph · LangChain · Claude (Anthropic) · aiogram · psycopg 3 · sqlglot · pandas · matplotlib · Chart.js · Docker
+
+---
