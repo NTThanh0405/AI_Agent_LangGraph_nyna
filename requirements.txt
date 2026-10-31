@@ -3,7 +3,7 @@ uvicorn[standard]>=0.30
 pydantic>=2.7
 pydantic-settings>=2.3
 python-dotenv>=1.0
-tzdata>=2024.1                      # múi giờ Asia/Ho_Chi_Minh cho ZoneInfo (image slim có thể thiếu)
+tzdata>=2024.1                      
 
 langgraph>=0.2
 langchain-core>=0.3
@@ -22,6 +22,5 @@ aiogram>=3.13                       # bot Telegram bất đồng bộ, dùng lon
 # --- Cấu hình bằng file (bước 1 và 3) ---
 pyyaml>=6.0                         # đọc config/allowlist.yaml, thresholds.yaml, targets.yaml, calendar.yaml
 
-# --- Phân tích và biểu đồ (bước 6, có thể thêm sau) ---
-pandas>=2.2                         # analysis_tools: so sánh kỳ, Pareto, cohort, RFM
-matplotlib>=3.9                     # chart_tools: biểu đồ nhanh dạng ảnh PNG
+pandas>=2.2                         
+matplotlib>=3.9                     
