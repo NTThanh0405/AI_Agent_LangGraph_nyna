@@ -1,8 +1,9 @@
 # app/main.py
-# Điểm khởi động của dịch vụ. Khi khởi động: cấu hình log, nạp allowlist Telegram (sai thì
-# báo lỗi ngay), mở connection pool PostgreSQL, chọn nơi lưu hội thoại (PostgresSaver hoặc
-# RAM), compile graph một lần và chạy ba tác vụ nền (bot Telegram, dọn phiên hết hạn, dọn
-# dashboard hết hạn). FastAPI chỉ còn phục vụ health check cho Docker HEALTHCHECK.
+# Điểm khởi động của dịch vụ. Khi khởi động: cấu hình log, mở pool PostgreSQL chỉ-đọc (dữ liệu
+# kinh doanh) và pool ghi cho database agent_app (người dùng, hội thoại, audit), tạo bảng
+# người dùng và nạp owner đầu tiên nếu bảng còn trống, dựng checkpointer PostgresSaver,
+# compile graph một lần và chạy các tác vụ nền (bot Telegram, dọn phiên hết hạn, dọn dashboard
+# hết hạn, dọn hội thoại/audit cũ). FastAPI chỉ còn phục vụ health check cho Docker HEALTHCHECK.
 # Khi tắt thì dừng các tác vụ nền và đóng pool.
 
 import asyncio
@@ -12,15 +13,17 @@ import signal
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from psycopg.rows import dict_row
+from psycopg_pool import AsyncConnectionPool
 
 from app.agent.graph import build_graph
-from app.agent.sessions import sweep_loop
 from app.agent.tools import ALL_TOOLS
 from app.agent.tools.dashboard_tools import cleanup_loop as dashboard_cleanup_loop
 from app.api.v1.router import api_router
 from app.config import get_settings
 from app.db.pool import close_pool, init_pool
-from app.telegram.auth import load_allowlist
+from app.telegram.auth import init_users
 from app.telegram.bot import run_bot
 
 settings = get_settings()
@@ -46,37 +49,44 @@ def _on_bot_done(task: asyncio.Task) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    count = load_allowlist()  # file allowlist sai thì dừng ngay, trước khi mở kết nối
-    logger.info("Allowlist có %d người dùng", count)
+    # Danh sách người dùng nằm trong database agent_app nên CHECKPOINT_DATABASE_URL là bắt buộc.
+    if not settings.checkpoint_database_url:
+        raise RuntimeError(
+            "Thiếu CHECKPOINT_DATABASE_URL: cần database agent_app để lưu người dùng và hội thoại"
+        )
 
-    await init_pool()
+    await init_pool()  # pool chỉ-đọc tới database kinh doanh (dùng cho tool SQL)
     try:
         async with AsyncExitStack() as stack:
-            checkpointer = None  # None -> graph dùng MemorySaver (RAM)
-            if settings.checkpoint_database_url:
-                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            # Pool ghi tới agent_app (role agent_checkpoint). Các tham số này do
+            # AsyncPostgresSaver yêu cầu; dict_row để auth.py/retention.py đọc row["cột"].
+            cp_pool = AsyncConnectionPool(
+                conninfo=settings.checkpoint_database_url.get_secret_value(),
+                min_size=1,
+                max_size=3,
+                kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+                open=False,
+            )
+            await cp_pool.open(wait=True)  # báo lỗi ngay nếu không kết nối được
+            stack.push_async_callback(cp_pool.close)
 
-                checkpointer = await stack.enter_async_context(
-                    AsyncPostgresSaver.from_conn_string(
-                        settings.checkpoint_database_url.get_secret_value()
-                    )
-                )
-                await checkpointer.setup()
-                logger.info("Hội thoại được lưu trong PostgreSQL (PostgresSaver)")
-            else:
-                logger.warning(
-                    "Chưa cấu hình CHECKPOINT_DATABASE_URL: hội thoại lưu trong RAM, "
-                    "sẽ mất khi restart"
-                )
+            checkpointer = AsyncPostgresSaver(cp_pool)
+            await checkpointer.setup()  # tạo bảng checkpoint nếu chưa có
+            await init_users(cp_pool)  # tạo bảng users; nạp users_seed.yaml nếu còn trống
+            logger.info("Hội thoại và người dùng được lưu trong PostgreSQL (agent_app)")
 
             app.state.graph = build_graph(ALL_TOOLS, checkpointer)
+            app.state.cp_pool = cp_pool
 
-            bot_task = asyncio.create_task(run_bot(app.state.graph), name="telegram-bot")
+            bot_task = asyncio.create_task(
+                run_bot(app.state.graph, cp_pool), name="telegram-bot"
+            )
             bot_task.add_done_callback(_on_bot_done)
             tasks = [
                 bot_task,
                 asyncio.create_task(sweep_loop(app.state.graph)),
                 asyncio.create_task(dashboard_cleanup_loop()),
+                asyncio.create_task(purge_loop(cp_pool, checkpointer)),
             ]
             try:
                 yield

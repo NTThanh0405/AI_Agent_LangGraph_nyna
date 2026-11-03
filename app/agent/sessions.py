@@ -1,105 +1,69 @@
-# app/agent/sessions.py
-# Quản lý "phiên" hội thoại: nhớ trong phiên, quá SESSION_TTL_SECONDS không hoạt động thì xoá.
-# Mỗi thread có một khoá asyncio để hai request cùng thread không chạy chồng lên nhau.
-# Mỗi người dùng Telegram có đúng một thread (xem thread_for); hết hạn hoặc /new thì
-# xoá checkpoint của thread đó, nên không cần đổi thread_id.
-# Chỉ đúng khi chạy MỘT process (Dockerfile dùng 1 worker uvicorn, đừng thêm --workers).
+# app/agent/retention.py
+# Tự dọn dữ liệu cũ trong agent_app:
+#   - hội thoại không hoạt động quá CHAT_RETENTION_DAYS ngày (dựa vào thời điểm ghi
+#     checkpoint cuối cùng, nên vẫn đúng sau khi restart)
+#   - nhật ký audit_log quá AUDIT_RETENTION_DAYS ngày
+# sessions.py vẫn lo phiên hết hạn trong lúc chạy; file này lo phần còn sót trong database.
 
 import asyncio
 import logging
-import time
 
-from app.config import get_settings
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from psycopg_pool import AsyncConnectionPool
 
 logger = logging.getLogger(__name__)
 
-SESSION_TTL_SECONDS = get_settings().session_ttl_minutes * 60  # đổi bằng SESSION_TTL_MINUTES trong .env
-SWEEP_INTERVAL_SECONDS = 300
-
-_last_seen: dict[str, float] = {}
-_locks: dict[str, asyncio.Lock] = {}
+CHAT_RETENTION_DAYS = 3
+AUDIT_RETENTION_DAYS = 90
+PURGE_INTERVAL_SECONDS = 3600  # quét mỗi giờ
 
 
-def thread_for(user_id: int | str) -> str:
-    """Thread hội thoại của một người dùng Telegram (mỗi người một thread)."""
-    return f"tg:{user_id}"
+async def purge_chats(pool: AsyncConnectionPool, checkpointer: BaseCheckpointSaver) -> int:
+    """Xóa thread có checkpoint mới nhất cũ hơn CHAT_RETENTION_DAYS ngày."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            SELECT thread_id
+            FROM agent_state.checkpoints
+            GROUP BY thread_id
+            HAVING max((checkpoint->>'ts')::timestamptz)
+                   < now() - make_interval(days => %s)
+            """,
+            (CHAT_RETENTION_DAYS,),
+        )
+        expired = [r["thread_id"] for r in await cur.fetchall()]
+
+    for thread_id in expired:
+        await checkpointer.adelete_thread(thread_id)  # xóa checkpoint, blobs, writes
+    return len(expired)
 
 
-def get_lock(thread: str) -> asyncio.Lock:
-    """Khoá của thread; tạo mới nếu chưa có."""
-    lock = _locks.get(thread)
-    if lock is None:
-        lock = _locks[thread] = asyncio.Lock()
-    return lock
+async def purge_audit(pool: AsyncConnectionPool) -> int:
+    """Xóa nhật ký quá AUDIT_RETENTION_DAYS ngày."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "DELETE FROM agent_state.audit_log "
+            "WHERE created_at < now() - make_interval(days => %s)",
+            (AUDIT_RETENTION_DAYS,),
+        )
+        return cur.rowcount
 
 
-def is_busy(thread: str) -> bool:
-    """Thread đang có request chạy không (để bot báo "đang xử lý câu trước" thay vì xếp hàng im lặng)."""
-    lock = _locks.get(thread)
-    return lock is not None and lock.locked()
-
-
-def _forget(thread: str) -> None:
-    """Bỏ ghi nhận thread; giữ lại khoá nếu đang có request chạy."""
-    _last_seen.pop(thread, None)
-    lock = _locks.get(thread)
-    if lock is not None and not lock.locked():
-        _locks.pop(thread, None)
-
-
-async def touch(graph, thread: str) -> bool:
-    """Gọi đầu mỗi request (bên trong khoá): phiên cũ đã quá hạn thì xoá trước khi chạy tiếp.
-
-    Trả về True nếu vừa xoá một phiên hết hạn, để bot báo cho người dùng biết
-    cuộc trò chuyện mới đã bắt đầu.
-    """
-    now = time.monotonic()
-    last = _last_seen.get(thread)
-    cleared = False
-    if last is not None and now - last > SESSION_TTL_SECONDS:
-        try:
-            await graph.checkpointer.adelete_thread(thread)
-            cleared = True
-            logger.info("Phiên %s đã hết hạn, bắt đầu phiên mới", thread)
-        except Exception:
-            # Không để lỗi dọn dẹp làm hỏng câu hỏi đang chờ trả lời.
-            logger.exception("Không xoá được phiên hết hạn %s", thread)
-    _last_seen[thread] = now
-    return cleared
-
-
-async def reset(graph, thread: str) -> None:
-    """Kết thúc phiên ngay (người dùng gõ /new, hoặc lượt chạy bị lỗi).
-    Handler nên gọi bên trong `async with get_lock(thread)` để không xoá giữa lúc đang chạy."""
-    await graph.checkpointer.adelete_thread(thread)
-    _forget(thread)
-
-
-async def _sweep_once(graph) -> None:
-    now = time.monotonic()
-    expired = [
-        t for t, ts in list(_last_seen.items())
-        if now - ts > SESSION_TTL_SECONDS and not is_busy(t)
-    ]
-    for t in expired:
-        try:
-            await graph.checkpointer.adelete_thread(t)
-        except Exception:
-            logger.exception("Không xoá được phiên %s", t)
-        _forget(t)
-    for t, lock in list(_locks.items()):
-        if t not in _last_seen and not lock.locked():
-            _locks.pop(t, None)
-    if expired:
-        logger.info("Đã dọn %d phiên hết hạn", len(expired))
-
-
-async def sweep_loop(graph) -> None:
-    """Chạy nền: xoá phiên hết hạn (kể cả khi người đó không nhắn lại) và khoá mồ côi.
-    Lỗi một vòng chỉ được ghi log, vòng dọn không bị chết."""
+async def purge_loop(pool: AsyncConnectionPool, checkpointer: BaseCheckpointSaver) -> None:
+    """Vòng nền: định kỳ dọn dữ liệu cũ. Lỗi một việc không làm chết vòng."""
     while True:
-        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
         try:
-            await _sweep_once(graph)
+            n = await purge_chats(pool, checkpointer)
+            if n:
+                logger.info("Đã xóa %d hội thoại quá %d ngày", n, CHAT_RETENTION_DAYS)
         except Exception:
-            logger.exception("Vòng dọn phiên gặp lỗi")
+            logger.exception("Dọn hội thoại cũ thất bại")
+
+        try:
+            n = await purge_audit(pool)
+            if n:
+                logger.info("Đã xóa %d dòng audit quá %d ngày", n, AUDIT_RETENTION_DAYS)
+        except Exception:
+            logger.exception("Dọn audit_log thất bại")
+
+        await asyncio.sleep(PURGE_INTERVAL_SECONDS)

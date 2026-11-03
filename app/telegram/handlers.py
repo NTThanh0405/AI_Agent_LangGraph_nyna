@@ -125,7 +125,6 @@ class AllowlistMiddleware(BaseMiddleware):
 
 # ---------------------------------------------------------------- hỏi đáp với agent
 
-
 async def _ask(message: Message, user: AllowedUser, graph, text: str) -> None:
     """Gửi một câu hỏi cho agent và trả lời người dùng."""
     uid = str(user.telegram_id)
@@ -153,13 +152,13 @@ async def cmd_myid(message: Message) -> None:
 
 async def cmd_start(message: Message, user: AllowedUser) -> None:
     text = f"Xin chào {user.name or ''}!\n\n{HELP_TEXT}".replace("Xin chào !", "Xin chào!")
-    if user.admin_level >= ADMIN:
+    if user.is_admin:
         text += ADMIN_HELP_TEXT
     await message.answer(text)
 
 
 async def cmd_help(message: Message, user: AllowedUser) -> None:
-    text = HELP_TEXT + (ADMIN_HELP_TEXT if user.admin_level >= ADMIN else "")
+    text = HELP_TEXT + (ADMIN_HELP_TEXT if user.is_admin else "")
     await message.answer(text)
 
 
@@ -193,18 +192,9 @@ async def cmd_dashboard(message: Message, user: AllowedUser, graph) -> None:
 # ---------------------------------------------------------------- lệnh quản trị
 # Chỉ admin (cấp 1) và owner (cấp 2) dùng được. Người thường gõ thì im lặng.
 
-
-def _actor_dict(user: AllowedUser) -> dict:
-    return {"role": user.role, "admin_level": user.admin_level}
-
-
-def _is_admin(user: AllowedUser) -> bool:
-    return user.admin_level >= ADMIN
-
-
 async def _add(message: Message, command: CommandObject, user: AllowedUser, pool,
                level: int | None, usage: str) -> None:
-    if not _is_admin(user):
+    if not user.is_admin:
         return
     parts = (command.args or "").split(maxsplit=2)
     if len(parts) < 2 or not parts[0].isdigit():
@@ -215,7 +205,7 @@ async def _add(message: Message, command: CommandObject, user: AllowedUser, pool
     if not valid_role(role):
         await message.answer("Role không hợp lệ. Các role: " + ", ".join(sorted(ROLE_TABLES)))
         return
-    err = await check_manage(pool, user.telegram_id, _actor_dict(user), tid, role, level)
+    err = await check_manage(pool, user, tid, role, level)
     if err:
         await message.answer(err)
         return
@@ -233,14 +223,14 @@ async def cmd_addadmin(message: Message, command: CommandObject, user: AllowedUs
 
 
 async def cmd_removeadmin(message: Message, command: CommandObject, user: AllowedUser, pool) -> None:
-    if not _is_admin(user):
+    if not user.is_admin:
         return
     arg = (command.args or "").strip()
     if not arg.isdigit():
         await message.answer("Cú pháp: /removeadmin <telegram_id>")
         return
     tid = int(arg)
-    err = await check_manage(pool, user.telegram_id, _actor_dict(user), tid, None, None)
+    err = await check_manage(pool, user, tid, None, None)
     if err:
         await message.answer(err)
         return
@@ -251,14 +241,14 @@ async def cmd_removeadmin(message: Message, command: CommandObject, user: Allowe
 
 
 async def cmd_removeuser(message: Message, command: CommandObject, user: AllowedUser, pool) -> None:
-    if not _is_admin(user):
+    if not user.is_admin:
         return
     arg = (command.args or "").strip()
     if not arg.isdigit():
         await message.answer("Cú pháp: /removeuser <telegram_id>")
         return
     tid = int(arg)
-    err = await check_manage(pool, user.telegram_id, _actor_dict(user), tid, None, None)
+    err = await check_manage(pool, user, tid, None, None)
     if err:
         await message.answer(err)
         return
@@ -269,7 +259,7 @@ async def cmd_removeuser(message: Message, command: CommandObject, user: Allowed
 
 
 async def cmd_users(message: Message, user: AllowedUser, pool) -> None:
-    if not _is_admin(user):
+    if not user.is_admin:
         return
     rows = await list_users(pool)
     lines = [
@@ -280,7 +270,6 @@ async def cmd_users(message: Message, user: AllowedUser, pool) -> None:
 
 
 # ---------------------------------------------------------------- tin còn lại
-
 
 async def on_unknown_command(message: Message, user: AllowedUser) -> None:
     await message.answer("Mình chưa có lệnh này. Gõ /help để xem hướng dẫn.")

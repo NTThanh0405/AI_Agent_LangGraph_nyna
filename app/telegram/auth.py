@@ -2,8 +2,8 @@
 # Người dùng Telegram trong PostgreSQL: tra role, phân cấp quản trị, thêm/xóa người.
 
 import logging
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 import yaml
 from psycopg_pool import AsyncConnectionPool
@@ -28,6 +28,18 @@ CREATE TABLE IF NOT EXISTS agent_state.users (
 CREATE UNIQUE INDEX IF NOT EXISTS one_owner
     ON agent_state.users (admin_level) WHERE admin_level = 2;
 """
+
+
+@dataclass(frozen=True)
+class AllowedUser:
+    telegram_id: int
+    role: str
+    admin_level: int
+    name: str | None
+
+    @property
+    def is_admin(self) -> bool:
+        return self.admin_level >= ADMIN
 
 
 def valid_role(role: str) -> bool:
@@ -66,6 +78,14 @@ async def get_user(pool, telegram_id: int) -> dict | None:
         return await cur.fetchone()
 
 
+async def get_allowed_user(pool, telegram_id: int) -> AllowedUser | None:
+    """Tra database; trả về AllowedUser hoặc None nếu là người lạ."""
+    row = await get_user(pool, telegram_id)
+    if row is None:
+        return None
+    return AllowedUser(telegram_id, row["role"], row["admin_level"], row["name"])
+
+
 def _role_allowed(actor_role: str, target_role: str) -> bool:
     """Không cho cấp role có quyền xem rộng hơn role của chính người cấp (chống leo thang)."""
     actor = ROLE_TABLES.get(actor_role.lower(), set())
@@ -75,27 +95,23 @@ def _role_allowed(actor_role: str, target_role: str) -> bool:
 
 async def _admin_count(pool) -> int:
     async with pool.connection() as conn:
-        cur = await conn.execute("SELECT count(*) AS n FROM agent_state.users WHERE admin_level = %s", (ADMIN,))
+        cur = await conn.execute(
+            "SELECT count(*) AS n FROM agent_state.users WHERE admin_level = %s", (ADMIN,)
+        )
         return (await cur.fetchone())["n"]
 
-async def get_allowed_user(pool, telegram_id: int) -> AllowedUser | None:
-    """Tra database; trả về AllowedUser hoặc None nếu là người lạ."""
-    row = await get_user(pool, telegram_id)
-    if row is None:
-        return None
-    return AllowedUser(telegram_id, row["role"], row["admin_level"], row["name"])
 
-async def check_manage(pool, actor_id: int, actor: dict, target_id: int,
+async def check_manage(pool, actor: AllowedUser, target_id: int,
                        new_role: str | None, new_level: int | None) -> str | None:
     """Kiểm tra actor có được tác động lên target không. Trả về chuỗi lỗi, hoặc None nếu được phép."""
-    if actor["admin_level"] < ADMIN:
+    if not actor.is_admin:
         return "Bạn không có quyền quản lý người dùng."
-    if target_id == actor_id:
+    if target_id == actor.telegram_id:
         return "Không tự sửa hoặc tự xóa chính mình qua bot."
     target = await get_user(pool, target_id)
     if target and target["admin_level"] >= OWNER:
         return "Không thể tác động lên chủ chatbot."
-    if new_role and not _role_allowed(actor["role"], new_role):
+    if new_role and not _role_allowed(actor.role, new_role):
         return "Bạn không được cấp role có quyền xem rộng hơn quyền của bạn."
     if new_level == ADMIN and not (target and target["admin_level"] == ADMIN):
         if await _admin_count(pool) >= MAX_ADMINS:
@@ -154,17 +170,7 @@ async def log_change(pool, actor_id: int, text: str) -> None:
     logger.info("Thay đổi quyền bởi %s: %s", actor_id, text)
     async with pool.connection() as conn:
         await conn.execute(
-            "INSERT INTO agent_state.audit_log (user_id, question, status) VALUES (%s, %s, 'perm_change')",
+            "INSERT INTO agent_state.audit_log (user_id, question, status) "
+            "VALUES (%s, %s, 'perm_change')",
             (str(actor_id), text),
         )
-
-@dataclass(frozen=True)
-class AllowedUser:
-    telegram_id: int
-    role: str
-    admin_level: int
-    name: str | None
-
-    @property
-    def is_admin(self) -> bool:
-        return self.admin_level >= ADMIN

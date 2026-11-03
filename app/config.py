@@ -38,11 +38,9 @@ class Settings(BaseSettings):
     graph_max_steps: int = 12  # số bước tối đa của vòng chat <-> tools trong một lượt hỏi
 
     # ---- Telegram bot ----
-    allowlist_path: str = "config/allowlist.yaml"  # ai được dùng bot và vai trò của họ
     rate_limit_per_min: int = 5      # số câu hỏi tối đa mỗi phút cho mỗi người
     rate_limit_per_day: int = 100    # số câu hỏi tối đa mỗi ngày cho mỗi người
-    session_ttl_minutes: int = 60    # im lặng quá thời gian này thì xoá hội thoại (sessions.py)
-
+    session_ttl_minutes: int = 4320  # 3 ngày; im lặng quá thời gian này thì xoá hội thoại (sessions.py)
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "NynaGroup"
