@@ -1,84 +1,170 @@
 # app/telegram/auth.py
-# Xác định người dùng Telegram là ai và có vai trò gì, dựa trên allowlist ở server
-# (config/allowlist.yaml). Vai trò KHÔNG bao giờ lấy từ nội dung tin nhắn.
-# ID không có trong danh sách -> get_user trả None và bot bỏ qua tin nhắn đó.
+# Người dùng Telegram trong PostgreSQL: tra role, phân cấp quản trị, thêm/xóa người.
 
 import logging
-from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass
 
 import yaml
+from psycopg_pool import AsyncConnectionPool
 
-from app.agent.permissions import ROLE_TABLES, is_known_role
-from app.config import get_settings
+from app.agent.permissions import ROLE_TABLES
 
 logger = logging.getLogger(__name__)
 
+STAFF, ADMIN, OWNER = 0, 1, 2
+MAX_ADMINS = 3  # số admin (cấp 1) tối đa, không tính owner
+_LEVELS = {"staff": STAFF, "admin": ADMIN, "owner": OWNER}
 
-class AllowlistError(ValueError):
-    """File allowlist thiếu hoặc sai định dạng."""
+_CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS agent_state.users (
+    telegram_id bigint PRIMARY KEY,
+    name        text,
+    role        text NOT NULL,
+    admin_level smallint NOT NULL DEFAULT 0 CHECK (admin_level IN (0, 1, 2)),
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    created_by  bigint
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_owner
+    ON agent_state.users (admin_level) WHERE admin_level = 2;
+"""
 
+
+def valid_role(role: str) -> bool:
+    return role.lower() in ROLE_TABLES
+
+
+async def init_users(pool: AsyncConnectionPool, seed_file: str = "config/users_seed.yaml") -> None:
+    """Tạo bảng; nếu còn trống thì nạp từ yaml (mỗi người có level: owner/admin/staff)."""
+    async with pool.connection() as conn:
+        await conn.execute(_CREATE_SQL)
+        cur = await conn.execute("SELECT count(*) AS n FROM agent_state.users")
+        if (await cur.fetchone())["n"] > 0:
+            return
+        path = Path(seed_file)
+        if not path.exists():
+            logger.warning("Bảng users trống và không có %s: chưa ai dùng được bot", seed_file)
+            return
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for u in data.get("users", []):
+            level = _LEVELS.get(str(u.get("level", "staff")).lower(), STAFF)
+            await conn.execute(
+                "INSERT INTO agent_state.users (telegram_id, name, role, admin_level) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                (u["telegram_id"], u.get("name"), str(u["role"]).lower(), level),
+            )
+        logger.info("Đã nạp người dùng ban đầu từ %s", seed_file)
+
+
+async def get_user(pool, telegram_id: int) -> dict | None:
+    """Trả về {role, admin_level, name} hoặc None nếu người lạ. Tra DB mỗi lần nên có hiệu lực ngay."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT role, admin_level, name FROM agent_state.users WHERE telegram_id = %s",
+            (telegram_id,),
+        )
+        return await cur.fetchone()
+
+
+def _role_allowed(actor_role: str, target_role: str) -> bool:
+    """Không cho cấp role có quyền xem rộng hơn role của chính người cấp (chống leo thang)."""
+    actor = ROLE_TABLES.get(actor_role.lower(), set())
+    target = ROLE_TABLES.get(target_role.lower(), set())
+    return "*" in actor or target <= actor
+
+
+async def _admin_count(pool) -> int:
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) AS n FROM agent_state.users WHERE admin_level = %s", (ADMIN,))
+        return (await cur.fetchone())["n"]
+
+async def get_allowed_user(pool, telegram_id: int) -> AllowedUser | None:
+    """Tra database; trả về AllowedUser hoặc None nếu là người lạ."""
+    row = await get_user(pool, telegram_id)
+    if row is None:
+        return None
+    return AllowedUser(telegram_id, row["role"], row["admin_level"], row["name"])
+
+async def check_manage(pool, actor_id: int, actor: dict, target_id: int,
+                       new_role: str | None, new_level: int | None) -> str | None:
+    """Kiểm tra actor có được tác động lên target không. Trả về chuỗi lỗi, hoặc None nếu được phép."""
+    if actor["admin_level"] < ADMIN:
+        return "Bạn không có quyền quản lý người dùng."
+    if target_id == actor_id:
+        return "Không tự sửa hoặc tự xóa chính mình qua bot."
+    target = await get_user(pool, target_id)
+    if target and target["admin_level"] >= OWNER:
+        return "Không thể tác động lên chủ chatbot."
+    if new_role and not _role_allowed(actor["role"], new_role):
+        return "Bạn không được cấp role có quyền xem rộng hơn quyền của bạn."
+    if new_level == ADMIN and not (target and target["admin_level"] == ADMIN):
+        if await _admin_count(pool) >= MAX_ADMINS:
+            return f"Đã đủ {MAX_ADMINS} admin. Hãy gỡ bớt trước khi thêm."
+    return None
+
+
+async def upsert_user(pool, telegram_id: int, role: str, name: str | None,
+                      by: int, level: int | None = None) -> None:
+    """Thêm mới hoặc đổi role/tên. level=None thì giữ nguyên cấp quản trị hiện có."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_state.users (telegram_id, name, role, admin_level, created_by)
+            VALUES (%s, %s, %s, COALESCE(%s, 0), %s)
+            ON CONFLICT (telegram_id) DO UPDATE SET
+                role = EXCLUDED.role,
+                name = COALESCE(EXCLUDED.name, agent_state.users.name),
+                admin_level = COALESCE(%s, agent_state.users.admin_level)
+            """,
+            (telegram_id, name, role.lower(), level, by, level),
+        )
+
+
+async def demote_admin(pool, telegram_id: int) -> bool:
+    """Gỡ quyền admin, người đó vẫn là nhân viên. Không đụng tới owner."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "UPDATE agent_state.users SET admin_level = 0 WHERE telegram_id = %s AND admin_level = %s",
+            (telegram_id, ADMIN),
+        )
+        return cur.rowcount > 0
+
+
+async def remove_user(pool, telegram_id: int) -> bool:
+    """Xóa hẳn người dùng (nhân viên hoặc admin). Owner thì không xóa được."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "DELETE FROM agent_state.users WHERE telegram_id = %s AND admin_level < %s",
+            (telegram_id, OWNER),
+        )
+        return cur.rowcount > 0
+
+
+async def list_users(pool) -> list[dict]:
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT telegram_id, name, role, admin_level FROM agent_state.users "
+            "ORDER BY admin_level DESC, created_at"
+        )
+        return await cur.fetchall()
+
+
+async def log_change(pool, actor_id: int, text: str) -> None:
+    """Ghi thay đổi quyền vào audit_log (không cần bảng riêng)."""
+    logger.info("Thay đổi quyền bởi %s: %s", actor_id, text)
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO agent_state.audit_log (user_id, question, status) VALUES (%s, %s, 'perm_change')",
+            (str(actor_id), text),
+        )
 
 @dataclass(frozen=True)
 class AllowedUser:
     telegram_id: int
-    role: str   # chữ thường, luôn là vai trò có trong ROLE_TABLES
-    name: str
+    role: str
+    admin_level: int
+    name: str | None
 
-
-def _parse(raw: object) -> dict[int, AllowedUser]:
-    """Kiểm tra nội dung YAML và đổi thành {telegram_id: AllowedUser}.
-
-    Sai định dạng thì báo lỗi ngay khi khởi động, để gõ nhầm vai trò
-    (ví dụ "bosss") không âm thầm khiến người dùng mất quyền.
-    """
-    if not isinstance(raw, dict) or not isinstance(raw.get("users"), list):
-        raise AllowlistError("allowlist.yaml phải có khoá 'users' là một danh sách")
-
-    users: dict[int, AllowedUser] = {}
-    for i, item in enumerate(raw["users"], start=1):
-        if not isinstance(item, dict):
-            raise AllowlistError(f"Mục số {i} phải có dạng khoá: giá trị")
-
-        tid = item.get("telegram_id")
-        if isinstance(tid, bool) or not isinstance(tid, int):
-            raise AllowlistError(f"Mục số {i}: telegram_id phải là số nguyên")
-        if tid in users:
-            raise AllowlistError(f"Mục số {i}: telegram_id {tid} bị trùng")
-
-        role = str(item.get("role") or "").strip().lower()
-        if not is_known_role(role):
-            raise AllowlistError(
-                f"Mục số {i}: vai trò '{role}' không có trong ROLE_TABLES "
-                f"(app/agent/permissions.py). Các vai trò hợp lệ: "
-                f"{', '.join(sorted(ROLE_TABLES))}"
-            )
-
-        name = str(item.get("name") or tid)
-        users[tid] = AllowedUser(telegram_id=tid, role=role, name=name)
-    return users
-
-
-@lru_cache
-def _load() -> dict[int, AllowedUser]:
-    path = Path(get_settings().allowlist_path)
-    if not path.is_file():
-        raise AllowlistError(f"Không tìm thấy file allowlist: {path}")
-    with path.open(encoding="utf-8") as f:
-        users = _parse(yaml.safe_load(f))
-    logger.info("Đã nạp allowlist: %d người dùng", len(users))
-    return users
-
-
-def load_allowlist() -> int:
-    """Nạp (hoặc nạp lại) allowlist. Gọi một lần khi khởi động để lỗi cấu hình
-    hiện ra ngay. Trả về số người dùng."""
-    _load.cache_clear()
-    return len(_load())
-
-
-def get_user(telegram_id: int) -> Optional[AllowedUser]:
-    """Trả về người dùng nếu ID nằm trong allowlist, ngược lại None."""
-    return _load().get(telegram_id)
+    @property
+    def is_admin(self) -> bool:
+        return self.admin_level >= ADMIN
