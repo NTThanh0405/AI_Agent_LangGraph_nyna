@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     max_tokens: int = 4096  # create_dashboard nhiều biểu đồ cần chỗ cho JSON của tool call
     llm_timeout: int = 60
     graph_max_steps: int = 12  # số bước tối đa của vòng chat <-> tools trong một lượt hỏi
+    invoke_timeout_seconds: int = 120  # tổng thời gian tối đa cho một lượt hỏi (gồm nhiều vòng LLM + tool)
 
     # ---- Telegram bot ----
     rate_limit_per_min: int = 5      # số câu hỏi tối đa mỗi phút cho mỗi người

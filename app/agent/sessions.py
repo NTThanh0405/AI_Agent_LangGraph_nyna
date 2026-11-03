@@ -1,69 +1,136 @@
-# app/agent/retention.py
-# Tự dọn dữ liệu cũ trong agent_app:
-#   - hội thoại không hoạt động quá CHAT_RETENTION_DAYS ngày (dựa vào thời điểm ghi
-#     checkpoint cuối cùng, nên vẫn đúng sau khi restart)
-#   - nhật ký audit_log quá AUDIT_RETENTION_DAYS ngày
-# sessions.py vẫn lo phiên hết hạn trong lúc chạy; file này lo phần còn sót trong database.
+# app/agent/sessions.py
+# Quản lý phiên chat của từng người dùng (mỗi người một thread_id cố định) và cửa sổ lưu trữ:
+# CHỈ GIỮ các lượt hỏi trong SESSION_TTL_MINUTES gần nhất (mặc định 3 ngày), lượt cũ hơn bị
+# xoá hẳn khỏi database dù người dùng vẫn đang chat liên tục.
+#   - thread_for : đổi user id thành thread_id dùng cho LangGraph
+#   - get_lock / is_busy : mỗi thread chỉ chạy một lượt tại một thời điểm
+#   - touch : gọi đầu mỗi lượt; cắt các lượt quá hạn, trả True nếu cả hội thoại đã hết hạn
+#   - trim_thread : cắt lượt quá hạn của một thread (retention.py gọi mỗi giờ)
+#   - reset : xoá toàn bộ hội thoại của thread (/new, lượt hỏi bị lỗi)
+#   - sweep_loop : vòng nền xoá phiên im lặng quá hạn đang nằm trong RAM
+# Mỗi lượt hỏi được đóng dấu thời gian ở HumanMessage (additional_kwargs["ts"], xem runner.py);
+# AI/tool message thuộc về lượt của HumanMessage đứng trước nó. Lượt không có dấu thời gian
+# (dữ liệu cũ trước khi có cơ chế này) bị coi là quá hạn.
+# Khoá và mốc hoạt động giữ trong RAM nên service chỉ được chạy MỘT worker (xem Dockerfile).
 
 import asyncio
 import logging
+import time
+import weakref
 
-from langgraph.checkpoint.base import BaseCheckpointSaver
-from psycopg_pool import AsyncConnectionPool
+from langchain_core.messages import HumanMessage
+
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-CHAT_RETENTION_DAYS = 3
-AUDIT_RETENTION_DAYS = 90
-PURGE_INTERVAL_SECONDS = 3600  # quét mỗi giờ
+SWEEP_INTERVAL_SECONDS = 600  # quét phiên hết hạn trong RAM mỗi 10 phút
+
+# Khoá theo thread; khoá không còn ai giữ thì tự bị thu hồi.
+_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
+
+# Lần hoạt động gần nhất của mỗi thread (time.monotonic), chỉ cho sweep_loop.
+_last_active: dict[str, float] = {}
 
 
-async def purge_chats(pool: AsyncConnectionPool, checkpointer: BaseCheckpointSaver) -> int:
-    """Xóa thread có checkpoint mới nhất cũ hơn CHAT_RETENTION_DAYS ngày."""
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            """
-            SELECT thread_id
-            FROM agent_state.checkpoints
-            GROUP BY thread_id
-            HAVING max((checkpoint->>'ts')::timestamptz)
-                   < now() - make_interval(days => %s)
-            """,
-            (CHAT_RETENTION_DAYS,),
-        )
-        expired = [r["thread_id"] for r in await cur.fetchall()]
-
-    for thread_id in expired:
-        await checkpointer.adelete_thread(thread_id)  # xóa checkpoint, blobs, writes
-    return len(expired)
+def thread_for(user_id) -> str:
+    """thread_id của một người dùng. Nhận cả số lẫn chuỗi và luôn ra cùng một kết quả."""
+    return f"tg:{user_id}"
 
 
-async def purge_audit(pool: AsyncConnectionPool) -> int:
-    """Xóa nhật ký quá AUDIT_RETENTION_DAYS ngày."""
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "DELETE FROM agent_state.audit_log "
-            "WHERE created_at < now() - make_interval(days => %s)",
-            (AUDIT_RETENTION_DAYS,),
-        )
-        return cur.rowcount
+def get_lock(thread: str) -> asyncio.Lock:
+    lock = _locks.get(thread)
+    if lock is None:
+        lock = asyncio.Lock()
+        _locks[thread] = lock
+    return lock
 
 
-async def purge_loop(pool: AsyncConnectionPool, checkpointer: BaseCheckpointSaver) -> None:
-    """Vòng nền: định kỳ dọn dữ liệu cũ. Lỗi một việc không làm chết vòng."""
+def is_busy(thread: str) -> bool:
+    lock = _locks.get(thread)
+    return lock is not None and lock.locked()
+
+
+def _config(thread: str) -> dict:
+    return {"configurable": {"thread_id": thread}}
+
+
+def _ttl_seconds() -> float:
+    return get_settings().session_ttl_minutes * 60
+
+
+def _recent_messages(messages: list, cutoff_ts: float) -> list:
+    """Giữ nguyên thứ tự, chỉ giữ các lượt hỏi có dấu thời gian >= cutoff_ts."""
+    kept: list = []
+    keep_turn = False
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            ts = (m.additional_kwargs or {}).get("ts")
+            keep_turn = isinstance(ts, (int, float)) and ts >= cutoff_ts
+        if keep_turn:
+            kept.append(m)
+    return kept
+
+
+async def reset(graph, thread: str) -> None:
+    """Xoá toàn bộ hội thoại (checkpoint, blobs, writes) của thread."""
+    await graph.checkpointer.adelete_thread(thread)
+    _last_active.pop(thread, None)
+
+
+async def _trim(graph, thread: str, messages: list) -> tuple[bool, int]:
+    """Xoá lượt quá hạn. Trả về (có thay đổi không, số tin còn lại).
+
+    Xoá sạch mọi checkpoint cũ của thread rồi ghi lại MỘT checkpoint mới chỉ chứa phần còn lại,
+    vì checkpoint cũ vẫn mang nguyên lịch sử (nếu chỉ xoá tin trong state thì tin cũ còn nằm
+    trong database).
+    """
+    kept = _recent_messages(messages, time.time() - _ttl_seconds())
+    if len(kept) == len(messages):
+        return False, len(kept)
+    await graph.checkpointer.adelete_thread(thread)
+    if kept:
+        await graph.aupdate_state(_config(thread), {"messages": kept}, as_node="chat")
+    logger.info("Đã xoá %d tin quá hạn (thread=%s)", len(messages) - len(kept), thread)
+    return True, len(kept)
+
+
+async def trim_thread(graph, thread: str) -> bool:
+    """Cắt lượt quá hạn của một thread. Người gọi phải giữ khoá của thread."""
+    snapshot = await graph.aget_state(_config(thread))
+    messages = (snapshot.values or {}).get("messages") or [] if snapshot else []
+    if not messages:
+        return False
+    changed, _ = await _trim(graph, thread, messages)
+    return changed
+
+
+async def touch(graph, thread: str) -> bool:
+    """Gọi đầu mỗi lượt (người gọi đã giữ khoá): cắt lượt quá hạn. Trả về True nếu toàn bộ
+    hội thoại cũ đã quá hạn và bị xoá (lượt này bắt đầu một hội thoại mới)."""
+    expired = False
+    snapshot = await graph.aget_state(_config(thread))
+    messages = (snapshot.values or {}).get("messages") or [] if snapshot else []
+    if messages:
+        changed, remaining = await _trim(graph, thread, messages)
+        expired = changed and remaining == 0
+    _last_active[thread] = time.monotonic()
+    return expired
+
+
+async def sweep_loop(graph) -> None:
+    """Vòng nền: xoá các phiên im lặng quá hạn đang nằm trong RAM."""
     while True:
-        try:
-            n = await purge_chats(pool, checkpointer)
-            if n:
-                logger.info("Đã xóa %d hội thoại quá %d ngày", n, CHAT_RETENTION_DAYS)
-        except Exception:
-            logger.exception("Dọn hội thoại cũ thất bại")
-
-        try:
-            n = await purge_audit(pool)
-            if n:
-                logger.info("Đã xóa %d dòng audit quá %d ngày", n, AUDIT_RETENTION_DAYS)
-        except Exception:
-            logger.exception("Dọn audit_log thất bại")
-
-        await asyncio.sleep(PURGE_INTERVAL_SECONDS)
+        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+        cutoff = time.monotonic() - _ttl_seconds()
+        for thread, last in list(_last_active.items()):
+            if last > cutoff or is_busy(thread):
+                continue
+            try:
+                async with get_lock(thread):
+                    if _last_active.get(thread, 0.0) > cutoff:
+                        continue  # có lượt mới chen vào trong lúc chờ khoá
+                    await reset(graph, thread)
+                    logger.info("Đã xoá phiên hết hạn (thread=%s)", thread)
+            except Exception:
+                logger.exception("Không xoá được phiên hết hạn (thread=%s)", thread)

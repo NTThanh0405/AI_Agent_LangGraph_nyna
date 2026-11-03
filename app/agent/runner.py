@@ -10,6 +10,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+from langchain_core.messages import HumanMessage
 import anthropic
 from langgraph.errors import GraphRecursionError
 
@@ -83,7 +84,7 @@ async def run_turn(graph, *, user_id: str, role: str, message: str) -> TurnResul
         "recursion_limit": settings.graph_max_steps,
     }
     initial_state = {
-        "messages": [("user", message)],
+        "messages": [HumanMessage(content=message, additional_kwargs={"ts": time.time()})],
         "user_id": user_id,
         "user_role": role,
     }

@@ -19,6 +19,8 @@ from psycopg_pool import AsyncConnectionPool
 
 from app.agent.graph import build_graph
 from app.agent.tools import ALL_TOOLS
+from app.agent.retention import purge_loop
+from app.agent.sessions import sweep_loop
 from app.agent.tools.dashboard_tools import cleanup_loop as dashboard_cleanup_loop
 from app.api.v1.router import api_router
 from app.config import get_settings
@@ -86,7 +88,7 @@ async def lifespan(app: FastAPI):
                 bot_task,
                 asyncio.create_task(sweep_loop(app.state.graph)),
                 asyncio.create_task(dashboard_cleanup_loop()),
-                asyncio.create_task(purge_loop(cp_pool, checkpointer)),
+                asyncio.create_task(purge_loop(cp_pool, app.state.graph)),
             ]
             try:
                 yield
