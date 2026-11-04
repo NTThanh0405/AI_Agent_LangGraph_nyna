@@ -4,6 +4,8 @@
 # database (tên món, ghi chú khách...) không thể chèn mã vào trang.
 # Chart.js được nginx (dashboards-web) phục vụ cùng máy chủ tại /chart.umd.min.js, không
 # nạp từ CDN; không tải được hoặc vẽ lỗi thì biểu đồ rơi về dạng bảng số liệu.
+# Payload có nhiều dashboard con: từ 2 trở lên thì hiện thanh tab để chuyển qua lại; biểu đồ của
+# mỗi tab chỉ được vẽ lần đầu khi tab đó được mở (Chart.js cần khung đang hiển thị để đo kích thước).
 # Giao diện: nền sáng/tối theo máy người xem, 1 cột trên điện thoại, 2 cột trên màn hình rộng.
 
 TEMPLATE = r"""<!DOCTYPE html>
@@ -36,6 +38,15 @@ TEMPLATE = r"""<!DOCTYPE html>
   h1 { margin: 0 0 4px; font-size: clamp(1.35rem, 4vw, 1.9rem); font-weight: 650; letter-spacing: -0.01em; line-height: 1.25; }
   .meta { margin: 0; color: var(--muted); font-size: .875rem; }
   .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); }
+  .grid[hidden] { display: none; }
+  .tabs { display: flex; gap: 8px; overflow-x: auto; margin: 0 0 16px; padding-bottom: 2px; }
+  .tabs[hidden] { display: none; }
+  .tab {
+    flex: none; font: inherit; font-size: .9rem; padding: 8px 16px; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--ink);
+  }
+  .tab[aria-selected="true"] { background: var(--c1); border-color: var(--c1); color: var(--bg); font-weight: 600; }
+  .tab:focus-visible { outline: 2px solid var(--c1); outline-offset: 2px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
   .panel.wide { grid-column: 1 / -1; }
   h2 { margin: 0 0 12px; font-size: 1rem; font-weight: 600; line-height: 1.3; }
@@ -54,7 +65,8 @@ TEMPLATE = r"""<!DOCTYPE html>
     <h1 id="title"></h1>
     <p class="meta" id="meta"></p>
   </header>
-  <div class="grid" id="grid"></div>
+  <div class="tabs" id="tabs" role="tablist" aria-label="Chọn dashboard" hidden></div>
+  <div id="views"></div>
 </main>
 
 <script type="application/json" id="payload">__PAYLOAD__</script>
@@ -153,26 +165,73 @@ TEMPLATE = r"""<!DOCTYPE html>
   document.getElementById('meta').textContent =
     'Tạo lúc ' + data.generated + '. Số liệu chụp tại thời điểm tạo, không tự cập nhật. Link hết hạn lúc ' + data.expires + '.';
 
-  var grid = document.getElementById('grid');
-  data.charts.forEach(function (c) {
-    var panel = el('section', c.type === 'table' ? 'panel wide' : 'panel');
-    panel.appendChild(el('h2', '', c.title));
-    var hasData = c.type === 'table' ? c.rows.length > 0 : c.labels.length > 0;
-    if (!hasData) {
-      panel.appendChild(el('p', 'empty', 'Không có dữ liệu cho mục này.'));
-    } else if (c.type === 'table') {
-      panel.appendChild(buildTable(c.columns, c.rows));
-    } else if (typeof Chart === 'undefined') {
-      panel.appendChild(chartAsTable(c));
-    } else {
-      try {
-        panel.appendChild(buildChart(c));
-      } catch (e) {
+  var dashboards = data.dashboards || [];
+  var tabsEl = document.getElementById('tabs');
+  var views = document.getElementById('views');
+  var sections = [], buttons = [], rendered = [];
+
+  function renderCharts(d, container) {
+    d.charts.forEach(function (c) {
+      var panel = el('section', c.type === 'table' ? 'panel wide' : 'panel');
+      panel.appendChild(el('h2', '', c.title));
+      var hasData = c.type === 'table' ? c.rows.length > 0 : c.labels.length > 0;
+      if (!hasData) {
+        panel.appendChild(el('p', 'empty', 'Không có dữ liệu cho mục này.'));
+      } else if (c.type === 'table') {
+        panel.appendChild(buildTable(c.columns, c.rows));
+      } else if (typeof Chart === 'undefined') {
         panel.appendChild(chartAsTable(c));
+      } else {
+        try {
+          panel.appendChild(buildChart(c));
+        } catch (e) {
+          panel.appendChild(chartAsTable(c));
+        }
       }
+      container.appendChild(panel);
+    });
+  }
+
+  function show(i, focus) {
+    sections.forEach(function (sec, k) { sec.hidden = k !== i; });
+    buttons.forEach(function (b, k) {
+      b.setAttribute('aria-selected', k === i ? 'true' : 'false');
+      b.tabIndex = k === i ? 0 : -1;
+    });
+    if (!rendered[i]) { rendered[i] = true; renderCharts(dashboards[i], sections[i]); }
+    if (focus && buttons[i]) buttons[i].focus();
+    if (dashboards.length > 1) {
+      try { history.replaceState(null, '', '#' + (i + 1)); } catch (e) {}
     }
-    grid.appendChild(panel);
+  }
+
+  dashboards.forEach(function (d, i) {
+    var sec = el('div', 'grid');
+    sec.id = 'view-' + i;
+    sec.setAttribute('role', 'tabpanel');
+    sec.hidden = true;
+    views.appendChild(sec);
+    sections.push(sec);
+    if (dashboards.length > 1) {
+      var b = el('button', 'tab', d.name);
+      b.type = 'button';
+      b.id = 'tab-' + i;
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-controls', 'view-' + i);
+      b.addEventListener('click', function () { show(i, false); });
+      b.addEventListener('keydown', function (ev) {
+        var n = dashboards.length;
+        if (ev.key === 'ArrowRight') { ev.preventDefault(); show((i + 1) % n, true); }
+        else if (ev.key === 'ArrowLeft') { ev.preventDefault(); show((i - 1 + n) % n, true); }
+      });
+      tabsEl.appendChild(b);
+      buttons.push(b);
+    }
   });
+
+  if (dashboards.length > 1) tabsEl.hidden = false;
+  var start = parseInt((location.hash || '').slice(1), 10) - 1;
+  show(start >= 0 && start < dashboards.length ? start : 0, false);
 })();
 </script>
 </body>

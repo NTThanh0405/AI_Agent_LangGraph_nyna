@@ -1,8 +1,8 @@
 # app/agent/tools/sql_tools.py
-# Ba tool để agent làm việc với PostgreSQL nội bộ: liệt kê bảng, xem cột của bảng,
-# chạy câu SELECT. Mọi tool đều lọc theo quyền của người hỏi (user_role, lấy từ config
+# Tool chạy câu SELECT cho agent (run_select_query) và các hàm dùng chung cho tool khác
+# (_caller, _cell, _first_line). Tool lọc theo quyền của người hỏi (user_role, lấy từ config
 # do app/api/v1/agent_route.py truyền vào) và trả lỗi dạng chữ để LLM tự sửa câu SQL.
-# Bảng không ghi schema được hiểu là schema mặc định DB_SCHEMA (dwh).
+# Khám phá database (liệt kê bảng, xem cột, dữ liệu mẫu) nằm ở explore_tools.py.
 
 import logging
 from typing import Optional
@@ -11,7 +11,7 @@ import psycopg
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app.agent.permissions import PermissionDenied, can_access, ensure_access, filter_tables
+from app.agent.permissions import PermissionDenied, ensure_access
 from app.config import get_settings
 from app.db.guard import UnsafeSQLError, check_select
 from app.db.pool import get_pool
@@ -37,59 +37,6 @@ def _cell(value) -> str:
 
 def _first_line(e: Exception) -> str:
     return (str(e).splitlines() or [""])[0]
-
-
-@tool
-async def list_tables(config: RunnableConfig) -> str:
-    """Liệt kê các bảng/view mà người dùng hiện tại được phép xem, dạng schema.table."""
-    _, role = _caller(config)
-    schema = get_settings().db_schema
-    query = (
-        "SELECT table_schema, table_name FROM information_schema.tables "
-        "WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW') ORDER BY 1, 2"
-    )
-    try:
-        async with get_pool().connection() as conn:
-            rows = await (await conn.execute(query, (schema,))).fetchall()
-    except psycopg.Error as e:
-        logger.warning("list_tables lỗi: %s", e)
-        return "Không đọc được danh sách bảng từ database."
-
-    names = filter_tables(role, (f"{s}.{t}" for s, t in rows))
-    return "\n".join(names) if names else "Không có bảng nào bạn được phép xem."
-
-
-@tool
-async def describe_table(table_name: str, config: RunnableConfig) -> str:
-    """Xem danh sách cột (tên, kiểu dữ liệu, có cho NULL không) của một bảng.
-
-    table_name dạng "dwh.table" hoặc "table" (mặc định schema dwh). Chỉ hiện các cột
-    được phép đọc; thông tin cá nhân của khách không nằm trong danh sách.
-    """
-    _, role = _caller(config)
-    schema, _, table = table_name.strip().lower().rpartition(".")
-    schema = schema or get_settings().db_schema
-    not_found = f"Không tìm thấy bảng '{table_name}' hoặc bạn không có quyền xem."
-
-    if not can_access(role, f"{schema}.{table}"):
-        return not_found
-
-    query = (
-        "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
-        "WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position"
-    )
-    try:
-        async with get_pool().connection() as conn:
-            rows = await (await conn.execute(query, (schema, table))).fetchall()
-    except psycopg.Error as e:
-        logger.warning("describe_table lỗi: %s", e)
-        return "Không đọc được cấu trúc bảng từ database."
-
-    if not rows:
-        return not_found
-    lines = [f"{name} ({dtype}, {'null' if nullable == 'YES' else 'not null'})"
-             for name, dtype, nullable in rows]
-    return f"Bảng {schema}.{table}:\n" + "\n".join(lines)
 
 
 @tool

@@ -1,8 +1,10 @@
 # app/agent/tools/dashboard_tools.py
 # Tool tạo dashboard HTML theo yêu cầu người dùng.
-# LLM chỉ mô tả dashboard (tiêu đề + danh sách biểu đồ, mỗi biểu đồ một câu SELECT);
+# LLM chỉ mô tả dashboard: một tiêu đề chung + danh sách dashboard con (mỗi cái là một tab,
+# ví dụ "Doanh thu", "Kho"), mỗi dashboard con gồm các biểu đồ, mỗi biểu đồ một câu SELECT;
 # code tự chạy SQL (qua đúng check_select + phân quyền theo vai trò), đổ dữ liệu vào
-# template cố định, lưu file với tên ngẫu nhiên rồi trả link. LLM không tự viết HTML.
+# template cố định, lưu file với tên ngẫu nhiên rồi trả MỘT link duy nhất (nhiều dashboard
+# thì chuyển qua lại bằng tab trong trang). LLM không tự viết HTML.
 # File được ghi vào DASHBOARD_DIR (volume dùng chung); container dashboards-web (nginx)
 # đọc thư mục đó để phục vụ link. Số file và dung lượng thư mục có giới hạn;
 # cleanup_loop xoá file quá DASHBOARD_TTL_HOURS.
@@ -38,6 +40,8 @@ MAX_CHART_POINTS = 60
 MAX_FILES = 500
 MAX_TOTAL_BYTES = 200 * 1024 * 1024
 CLEANUP_INTERVAL_SECONDS = 300
+MAX_DASHBOARDS = 6        # số tab tối đa trong một link
+MAX_TOTAL_CHARTS = 24     # tổng số biểu đồ tối đa của toàn bộ link (mỗi biểu đồ là một truy vấn)
 
 
 class ChartSpec(BaseModel):
@@ -61,6 +65,18 @@ class ChartSpec(BaseModel):
         default_factory=list,
         max_length=6,
         description="Tên các cột SỐ làm giá trị. pie chỉ dùng cột đầu. Không cần với table.",
+    )
+
+
+class DashboardSpec(BaseModel):
+    """Một dashboard con, hiển thị thành một tab trong trang."""
+
+    name: str = Field(
+        max_length=40,
+        description="Tên tab, ngắn gọn, ví dụ 'Doanh thu', 'Kho', 'Khách hàng'",
+    )
+    charts: list[ChartSpec] = Field(
+        min_length=1, description="Các biểu đồ thuộc dashboard này"
     )
 
 
@@ -158,27 +174,44 @@ def _write_atomic(tmp: Path, final: Path, html: str) -> None:
 
 
 @tool
-async def create_dashboard(title: str, charts: list[ChartSpec], config: RunnableConfig) -> str:
-    """Tạo dashboard HTML trực quan (biểu đồ cột/đường/tròn và bảng) rồi trả về LINK để xem.
+async def create_dashboard(
+    title: str, dashboards: list[DashboardSpec], config: RunnableConfig
+) -> str:
+    """Tạo trang dashboard HTML trực quan (biểu đồ cột/đường/tròn và bảng) rồi trả về MỘT LINK để xem.
 
     Chỉ dùng khi người dùng yêu cầu dashboard, biểu đồ hoặc báo cáo trực quan.
+    Luôn gọi tool này ĐÚNG MỘT LẦN cho mỗi yêu cầu. Nếu người dùng muốn nhiều dashboard
+    (ví dụ doanh thu và kho), đưa tất cả vào danh sách `dashboards`: mỗi phần tử là một tab
+    trong cùng một link, người xem tự chuyển qua lại. Chỉ có một dashboard thì không hiện tab.
     Mỗi biểu đồ gồm một câu SELECT nhẹ, đã gom nhóm sẵn. Chỉ dùng bảng người dùng được phép xem.
     Dashboard là ảnh chụp số liệu lúc tạo và tự hết hạn sau một thời gian.
     """
     s = get_settings()
     if not s.dashboard_base_url:
         return "Chưa cấu hình DASHBOARD_BASE_URL nên chưa tạo được dashboard."
-    if not charts:
-        return "Cần ít nhất một biểu đồ."
-    if len(charts) > s.dashboard_max_charts:
+    if not dashboards:
+        return "Cần ít nhất một dashboard."
+    if len(dashboards) > MAX_DASHBOARDS:
+        return f"Tối đa {MAX_DASHBOARDS} dashboard trong một link, hãy giảm bớt."
+    if any(len(d.charts) > s.dashboard_max_charts for d in dashboards):
         return f"Mỗi dashboard tối đa {s.dashboard_max_charts} biểu đồ, hãy giảm bớt."
+    total_charts = sum(len(d.charts) for d in dashboards)
+    if total_charts > MAX_TOTAL_CHARTS:
+        return f"Tổng cộng tối đa {MAX_TOTAL_CHARTS} biểu đồ trong một link, hãy giảm bớt."
 
     user_id, role = _caller(config)
     built = []
     try:
+        # Mọi câu SQL của mọi tab đều đi qua check_select + ensure_access theo vai trò
+        # của người tạo, nên file chỉ chứa dữ liệu mà người này được phép xem.
         async with get_pool().connection() as conn:
-            for spec in charts:
-                built.append(await _build_chart(conn, spec, role, s.db_max_rows))
+            for d in dashboards:
+                charts = []
+                for spec in d.charts:
+                    charts.append(await _build_chart(conn, spec, role, s.db_max_rows))
+                built.append(
+                    {"name": d.name.strip()[:40] or f"Dashboard {len(built) + 1}", "charts": charts}
+                )
     except _ChartError as e:
         return f"Không tạo được dashboard: {e}"
     except psycopg.errors.QueryCanceled:
@@ -197,7 +230,7 @@ async def create_dashboard(title: str, charts: list[ChartSpec], config: Runnable
         "title": title.strip()[:120] or "Dashboard",
         "generated": now.strftime("%d/%m/%Y %H:%M"),
         "expires": (now + timedelta(hours=s.dashboard_ttl_hours)).strftime("%d/%m/%Y %H:%M"),
-        "charts": built,
+        "dashboards": built,
     }
     # Thoát <, >, & để dữ liệu không thể đóng thẻ <script> hay chèn HTML
     blob = (
@@ -220,11 +253,12 @@ async def create_dashboard(title: str, charts: list[ChartSpec], config: Runnable
         return "Không lưu được dashboard (lỗi ghi file). Hãy báo người quản trị."
 
     logger.info(
-        "Dashboard %s... (user_id=%s, role=%s, %d biểu đồ)", name[:8], user_id, role, len(built)
+        "Dashboard %s... (user_id=%s, role=%s, %d tab, %d biểu đồ)",
+        name[:8], user_id, role, len(built), total_charts
     )
     url = f"{s.dashboard_base_url.rstrip('/')}/{name}.html"
     return (
-        f"Đã tạo dashboard '{payload['title']}'. "
+        f"Đã tạo dashboard '{payload['title']}' ({len(built)} dashboard trong cùng một link). "
         f"Link xem (hết hạn sau {s.dashboard_ttl_hours} giờ): {url}\n"
         "Hãy gửi nguyên văn link này cho người dùng."
     )
