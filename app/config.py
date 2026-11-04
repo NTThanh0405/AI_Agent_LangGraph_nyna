@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     service_api_key: Optional[SecretStr] = None
 
     model_name: str = "claude-sonnet-5-5"
-    temperature: float = 0.0
+    temperature: Optional[float] = None
     max_tokens: int = 4096  # create_dashboard nhiều biểu đồ cần chỗ cho JSON của tool call
     llm_timeout: int = 60
     graph_max_steps: int = 12  # số bước tối đa của vòng chat <-> tools trong một lượt hỏi

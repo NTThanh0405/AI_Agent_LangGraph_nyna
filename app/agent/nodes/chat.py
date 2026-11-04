@@ -44,7 +44,6 @@ def get_llm():
     llm = ChatAnthropic(
         model=s.model_name,
         api_key=s.anthropic_api_key,
-        temperature=s.temperature,
         max_tokens=s.max_tokens,
         timeout=s.llm_timeout,
         max_retries=2,

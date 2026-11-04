@@ -16,18 +16,22 @@ STAFF, ADMIN, OWNER = 0, 1, 2
 MAX_ADMINS = 3  # số admin (cấp 1) tối đa, không tính owner
 _LEVELS = {"staff": STAFF, "admin": ADMIN, "owner": OWNER}
 
-_CREATE_SQL = """
-CREATE TABLE IF NOT EXISTS agent_state.users (
-    telegram_id bigint PRIMARY KEY,
-    name        text,
-    role        text NOT NULL,
-    admin_level smallint NOT NULL DEFAULT 0 CHECK (admin_level IN (0, 1, 2)),
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    created_by  bigint
-);
-CREATE UNIQUE INDEX IF NOT EXISTS one_owner
-    ON agent_state.users (admin_level) WHERE admin_level = 2;
-"""
+_CREATE_SQL = (
+    """
+    CREATE TABLE IF NOT EXISTS agent_state.users (
+        telegram_id bigint PRIMARY KEY,
+        name        text,
+        role        text NOT NULL,
+        admin_level smallint NOT NULL DEFAULT 0 CHECK (admin_level IN (0, 1, 2)),
+        created_at  timestamptz NOT NULL DEFAULT now(),
+        created_by  bigint
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS one_owner
+        ON agent_state.users (admin_level) WHERE admin_level = 2
+    """,
+)
 
 
 @dataclass(frozen=True)
@@ -49,7 +53,8 @@ def valid_role(role: str) -> bool:
 async def init_users(pool: AsyncConnectionPool, seed_file: str = "config/users_seed.yaml") -> None:
     """Tạo bảng; nếu còn trống thì nạp từ yaml (mỗi người có level: owner/admin/staff)."""
     async with pool.connection() as conn:
-        await conn.execute(_CREATE_SQL)
+        for stmt in _CREATE_SQL:
+            await conn.execute(stmt)
         cur = await conn.execute("SELECT count(*) AS n FROM agent_state.users")
         if (await cur.fetchone())["n"] > 0:
             return
