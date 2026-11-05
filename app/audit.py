@@ -13,32 +13,37 @@ logger = logging.getLogger(__name__)
 
 _MAX_QUESTION_CHARS = 2000
 
-_CREATE_SQL = """
-CREATE TABLE IF NOT EXISTS agent_state.audit_log (
-    id            bigserial PRIMARY KEY,
-    created_at    timestamptz NOT NULL DEFAULT now(),
-    user_id       text,
-    user_role     text,
-    thread_id     text,
-    question      text,
-    sql_executed  text[],
-    row_count     int,
-    status        text,
-    input_tokens  int,
-    output_tokens int,
-    duration_ms   int
-);
-ALTER TABLE agent_state.audit_log ADD COLUMN IF NOT EXISTS user_role text;
-ALTER TABLE agent_state.audit_log ADD COLUMN IF NOT EXISTS thread_id text;
-CREATE INDEX IF NOT EXISTS idx_audit_created ON agent_state.audit_log (created_at);
-CREATE INDEX IF NOT EXISTS idx_audit_user ON agent_state.audit_log (user_id, created_at);
-"""
+# Mỗi phần tử là MỘT câu lệnh: pool dùng prepare_threshold=0 nên không chạy được nhiều lệnh
+# trong một lần execute.
+_CREATE_SQL = (
+    """
+    CREATE TABLE IF NOT EXISTS agent_state.audit_log (
+        id            bigserial PRIMARY KEY,
+        created_at    timestamptz NOT NULL DEFAULT now(),
+        user_id       text,
+        user_role     text,
+        thread_id     text,
+        question      text,
+        sql_executed  text[],
+        row_count     int,
+        status        text,
+        input_tokens  int,
+        output_tokens int,
+        duration_ms   int
+    )
+    """,
+    "ALTER TABLE agent_state.audit_log ADD COLUMN IF NOT EXISTS user_role text",
+    "ALTER TABLE agent_state.audit_log ADD COLUMN IF NOT EXISTS thread_id text",
+    "CREATE INDEX IF NOT EXISTS idx_audit_created ON agent_state.audit_log (created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_user ON agent_state.audit_log (user_id, created_at)",
+)
 
 
 async def init_audit(pool: AsyncConnectionPool) -> None:
     """Tạo bảng audit_log nếu chưa có và bổ sung cột thiếu. Gọi một lần khi khởi động."""
     async with pool.connection() as conn:
-        await conn.execute(_CREATE_SQL)
+        for stmt in _CREATE_SQL:
+            await conn.execute(stmt)
 
 
 async def log_turn(
