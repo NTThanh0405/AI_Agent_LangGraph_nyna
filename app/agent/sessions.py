@@ -1,41 +1,23 @@
 # app/agent/sessions.py
-# Quản lý phiên chat của từng người dùng (mỗi người một thread_id cố định) và cửa sổ lưu trữ:
-# CHỈ GIỮ các lượt hỏi trong SESSION_TTL_MINUTES gần nhất (mặc định 3 ngày), lượt cũ hơn bị
-# xoá hẳn khỏi database dù người dùng vẫn đang chat liên tục.
-#   - thread_for : đổi user id thành thread_id dùng cho LangGraph
-#   - get_lock / is_busy : mỗi thread chỉ chạy một lượt tại một thời điểm
-#   - touch : gọi đầu mỗi lượt; cắt các lượt quá hạn, trả True nếu cả hội thoại đã hết hạn
-#   - trim_thread : cắt lượt quá hạn của một thread (retention.py gọi mỗi giờ)
-#   - reset : xoá toàn bộ hội thoại của thread (/new, lượt hỏi bị lỗi)
-#   - sweep_loop : vòng nền xoá phiên im lặng quá hạn đang nằm trong RAM
-# Mỗi lượt hỏi được đóng dấu thời gian ở HumanMessage (additional_kwargs["ts"], xem runner.py);
-# AI/tool message thuộc về lượt của HumanMessage đứng trước nó. Lượt không có dấu thời gian
-# (dữ liệu cũ trước khi có cơ chế này) bị coi là quá hạn.
-# Khoá và mốc hoạt động giữ trong RAM nên service chỉ được chạy MỘT worker (xem Dockerfile).
+# Quản lý phiên chat: mỗi người tối đa max_sessions_per_user phiên, sổ cái là bảng
+# agent_state.chat_sessions, phiên đang dùng nằm ở agent_state.users.active_thread.
+# Xoá phiên = adelete_thread (checkpoints, blobs, writes) rồi xoá dòng sổ cái.
+# Các tham số (số phiên tối đa, số ngày hết hạn...) nằm trong app/config.py (biến môi trường).
+# Phiên bị xoá khi session_idle_days ngày không dùng hoặc quá session_max_days ngày kể từ lúc tạo.
+# Khoá theo thread giữ trong RAM nên service chỉ được chạy MỘT worker.
+# `pool` ở mọi hàm là pool tới database agent_app (row_factory=dict_row, xem app/main.py).
 
 import asyncio
 import logging
-import time
+import uuid
 import weakref
-
-from langchain_core.messages import HumanMessage
+from datetime import datetime, timedelta
 
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-SWEEP_INTERVAL_SECONDS = 600  # quét phiên hết hạn trong RAM mỗi 10 phút
-
-# Khoá theo thread; khoá không còn ai giữ thì tự bị thu hồi.
 _locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
-
-# Lần hoạt động gần nhất của mỗi thread (time.monotonic), chỉ cho sweep_loop.
-_last_active: dict[str, float] = {}
-
-
-def thread_for(user_id) -> str:
-    """thread_id của một người dùng. Nhận cả số lẫn chuỗi và luôn ra cùng một kết quả."""
-    return f"tg:{user_id}"
 
 
 def get_lock(thread: str) -> asyncio.Lock:
@@ -51,86 +33,212 @@ def is_busy(thread: str) -> bool:
     return lock is not None and lock.locked()
 
 
-def _config(thread: str) -> dict:
-    return {"configurable": {"thread_id": thread}}
+def session_expires_at(row: dict) -> datetime:
+    """Thời điểm phiên sẽ bị xoá: sớm hơn của (lần dùng cuối + 7 ngày, lúc tạo + 14 ngày)."""
+    s = get_settings()
+    return min(
+        row["last_active"] + timedelta(days=s.session_idle_days),
+        row["created_at"] + timedelta(days=s.session_max_days),
+    )
 
 
-def _ttl_seconds() -> float:
-    return get_settings().session_ttl_minutes * 60
-
-
-def _recent_messages(messages: list, cutoff_ts: float) -> list:
-    """Giữ nguyên thứ tự, chỉ giữ các lượt hỏi có dấu thời gian >= cutoff_ts."""
-    kept: list = []
-    keep_turn = False
-    for m in messages:
-        if isinstance(m, HumanMessage):
-            ts = (m.additional_kwargs or {}).get("ts")
-            keep_turn = isinstance(ts, (int, float)) and ts >= cutoff_ts
-        if keep_turn:
-            kept.append(m)
-    return kept
-
-
-async def reset(graph, thread: str) -> None:
-    """Xoá toàn bộ hội thoại (checkpoint, blobs, writes) của thread."""
+async def drop_session(graph, pool, thread: str) -> None:
+    """Xoá checkpoint trước, dòng sổ cái sau: lỗi giữa chừng thì lần dọn sau thử lại."""
     await graph.checkpointer.adelete_thread(thread)
-    _last_active.pop(thread, None)
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM agent_state.chat_sessions WHERE thread_id = %s", (thread,))
 
 
-async def _trim(graph, thread: str, messages: list) -> tuple[bool, int]:
-    """Xoá lượt quá hạn. Trả về (có thay đổi không, số tin còn lại).
-
-    Xoá sạch mọi checkpoint cũ của thread rồi ghi lại MỘT checkpoint mới chỉ chứa phần còn lại,
-    vì checkpoint cũ vẫn mang nguyên lịch sử (nếu chỉ xoá tin trong state thì tin cũ còn nằm
-    trong database).
-    """
-    kept = _recent_messages(messages, time.time() - _ttl_seconds())
-    if len(kept) == len(messages):
-        return False, len(kept)
-    await graph.checkpointer.adelete_thread(thread)
-    if kept:
-        await graph.aupdate_state(_config(thread), {"messages": kept}, as_node="chat")
-    logger.info("Đã xoá %d tin quá hạn (thread=%s)", len(messages) - len(kept), thread)
-    return True, len(kept)
-
-
-async def trim_thread(graph, thread: str) -> bool:
-    """Cắt lượt quá hạn của một thread. Người gọi phải giữ khoá của thread."""
-    snapshot = await graph.aget_state(_config(thread))
-    messages = (snapshot.values or {}).get("messages") or [] if snapshot else []
-    if not messages:
-        return False
-    changed, _ = await _trim(graph, thread, messages)
-    return changed
-
-
-async def touch(graph, thread: str) -> bool:
-    """Gọi đầu mỗi lượt (người gọi đã giữ khoá): cắt lượt quá hạn. Trả về True nếu toàn bộ
-    hội thoại cũ đã quá hạn và bị xoá (lượt này bắt đầu một hội thoại mới)."""
-    expired = False
-    snapshot = await graph.aget_state(_config(thread))
-    messages = (snapshot.values or {}).get("messages") or [] if snapshot else []
-    if messages:
-        changed, remaining = await _trim(graph, thread, messages)
-        expired = changed and remaining == 0
-    _last_active[thread] = time.monotonic()
-    return expired
+async def create_session(graph, pool, user_id) -> tuple[str, list[str]]:
+    """Tạo phiên mới và đặt làm phiên hiện tại. Vượt hạn mức thì xoá phiên ít dùng nhất.
+    Trả về (thread_id mới, danh sách thread đã bị xoá)."""
+    uid = str(user_id)
+    thread = f"tg:{uid}:{uuid.uuid4().hex[:8]}"
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            # Khoá theo user để hai lệnh /new cùng lúc không làm vượt hạn mức
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s::text))", (uid,))
+            cur = await conn.execute(
+                "SELECT thread_id FROM agent_state.chat_sessions "
+                "WHERE user_id = %s ORDER BY last_active DESC OFFSET %s",
+                (uid, get_settings().max_sessions_per_user - 1),  # chừa chỗ cho phiên mới
+            )
+            surplus = [r["thread_id"] for r in await cur.fetchall()]
+            await conn.execute(
+                "INSERT INTO agent_state.chat_sessions (thread_id, user_id) VALUES (%s, %s)",
+                (thread, uid),
+            )
+            await conn.execute(
+                "UPDATE agent_state.users SET active_thread = %s WHERE telegram_id = %s",
+                (thread, int(uid)),
+            )
+    evicted = []
+    for old in surplus:
+        if is_busy(old):
+            continue  # đang chạy, purge_expired sẽ dọn sau
+        await drop_session(graph, pool, old)
+        evicted.append(old)
+    return thread, evicted
 
 
-async def sweep_loop(graph) -> None:
-    """Vòng nền: xoá các phiên im lặng quá hạn đang nằm trong RAM."""
-    while True:
-        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
-        cutoff = time.monotonic() - _ttl_seconds()
-        for thread, last in list(_last_active.items()):
-            if last > cutoff or is_busy(thread):
-                continue
-            try:
-                async with get_lock(thread):
-                    if _last_active.get(thread, 0.0) > cutoff:
-                        continue  # có lượt mới chen vào trong lúc chờ khoá
-                    await reset(graph, thread)
-                    logger.info("Đã xoá phiên hết hạn (thread=%s)", thread)
-            except Exception:
-                logger.exception("Không xoá được phiên hết hạn (thread=%s)", thread)
+async def peek_active(pool, user_id) -> str | None:
+    """Phiên hiện tại của người dùng (chỉ đọc, không tạo mới)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT active_thread FROM agent_state.users WHERE telegram_id = %s",
+            (int(user_id),),
+        )
+        row = await cur.fetchone()
+    return row["active_thread"] if row else None
+
+
+async def reuse_empty_active(pool, user_id) -> str | None:
+    """Nếu phiên hiện tại còn trống (chưa có câu hỏi nào) thì trả về nó. Dùng cho /new để
+    gõ /new nhiều lần không đẩy các phiên có nội dung ra khỏi hạn mức."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT s.thread_id FROM agent_state.users u "
+            "JOIN agent_state.chat_sessions s ON s.thread_id = u.active_thread "
+            "WHERE u.telegram_id = %s AND s.title IS NULL",
+            (int(user_id),),
+        )
+        row = await cur.fetchone()
+    return row["thread_id"] if row else None
+
+
+async def get_or_create_active(graph, pool, user_id) -> tuple[str, bool]:
+    """Trả về (thread hiện tại, expired). expired=True nếu phiên cũ của người này đã
+    bị xoá (hết hạn hoặc lỗi) nên phải mở phiên mới."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT u.active_thread, (s.thread_id IS NOT NULL) AS alive "
+            "FROM agent_state.users u "
+            "LEFT JOIN agent_state.chat_sessions s ON s.thread_id = u.active_thread "
+            "WHERE u.telegram_id = %s",
+            (int(user_id),),
+        )
+        row = await cur.fetchone()
+    if row and row["active_thread"] and row["alive"]:
+        return row["active_thread"], False
+    thread, _ = await create_session(graph, pool, user_id)
+    return thread, bool(row and row["active_thread"])
+
+
+async def touch_session(pool, thread: str, message: str) -> None:
+    """Gọi đầu mỗi lượt: cập nhật lần dùng cuối, đặt tiêu đề nếu chưa có."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_state.chat_sessions "
+            "SET last_active = now(), title = COALESCE(title, left(%s::text, %s::int)) "
+            "WHERE thread_id = %s",
+            (message.replace("\n", " "), get_settings().session_title_max_chars, thread),
+        )
+
+
+async def list_sessions(pool, user_id) -> list[dict]:
+    """Các phiên của người dùng, sắp theo lúc tạo (thứ tự ổn định), kèm cờ is_active."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT s.thread_id, s.title, s.created_at, s.last_active, "
+            "       (s.thread_id = u.active_thread) AS is_active "
+            "FROM agent_state.chat_sessions s "
+            "LEFT JOIN agent_state.users u ON u.telegram_id = %s "
+            "WHERE s.user_id = %s ORDER BY s.created_at",
+            (int(user_id), str(user_id)),
+        )
+        return await cur.fetchall()
+
+
+async def switch_session(pool, user_id, thread: str) -> bool:
+    """Đặt phiên hiện tại. False nếu phiên không tồn tại hoặc không thuộc người này.
+    Cập nhật luôn last_active để phiên vừa chọn không bị coi là "ít dùng nhất"."""
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            cur = await conn.execute(
+                "UPDATE agent_state.chat_sessions SET last_active = now() "
+                "WHERE thread_id = %s AND user_id = %s",
+                (thread, str(user_id)),
+            )
+            if cur.rowcount != 1:
+                return False
+            await conn.execute(
+                "UPDATE agent_state.users SET active_thread = %s WHERE telegram_id = %s",
+                (thread, int(user_id)),
+            )
+            return True
+
+
+async def delete_own_session(graph, pool, user_id, thread: str) -> str:
+    """Xoá phiên của chính người dùng. Trả về 'ok' | 'busy' | 'not_found'."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM agent_state.chat_sessions WHERE thread_id = %s AND user_id = %s",
+            (thread, str(user_id)),
+        )
+        if not await cur.fetchone():
+            return "not_found"
+    if is_busy(thread):
+        return "busy"
+    async with get_lock(thread):
+        await drop_session(graph, pool, thread)
+    async with pool.connection() as conn:
+        # Xoá đúng phiên đang dùng thì bỏ trỏ, lượt sau tự mở phiên mới (không báo "hết hạn")
+        await conn.execute(
+            "UPDATE agent_state.users SET active_thread = NULL "
+            "WHERE telegram_id = %s AND active_thread = %s",
+            (int(user_id), thread),
+        )
+    return "ok"
+
+
+async def purge_user_sessions(graph, pool, user_id) -> int:
+    """Xoá toàn bộ phiên của một người (dùng khi xoá người dùng). Trả về số phiên đã xoá."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT thread_id FROM agent_state.chat_sessions WHERE user_id = %s",
+            (str(user_id),),
+        )
+        threads = [r["thread_id"] for r in await cur.fetchall()]
+    for thread in threads:
+        async with get_lock(thread):
+            await drop_session(graph, pool, thread)
+    return len(threads)
+
+
+async def reset(graph, pool, thread: str) -> None:
+    """Xoá hẳn một phiên (dùng khi lượt hỏi lỗi, tránh để lại hội thoại dở dang)."""
+    await drop_session(graph, pool, thread)
+
+
+async def purge_expired(graph, pool) -> int:
+    """Xoá phiên hết hạn và checkpoint mồ côi. Trả về số thread đã xoá."""
+    s = get_settings()
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT thread_id FROM agent_state.chat_sessions "
+            "WHERE last_active < now() - make_interval(days => %s) "
+            "   OR created_at  < now() - make_interval(days => %s)",
+            (s.session_idle_days, s.session_max_days),
+        )
+        expired = [r["thread_id"] for r in await cur.fetchall()]
+        cur = await conn.execute(
+            "SELECT DISTINCT c.thread_id FROM agent_state.checkpoints c "
+            "WHERE NOT EXISTS (SELECT 1 FROM agent_state.chat_sessions s "
+            "                  WHERE s.thread_id = c.thread_id)"
+        )
+        orphans = [r["thread_id"] for r in await cur.fetchall()]
+
+    count = 0
+    for thread in expired:
+        if is_busy(thread):
+            continue
+        async with get_lock(thread):
+            await drop_session(graph, pool, thread)
+        count += 1
+    for thread in orphans:
+        if is_busy(thread):
+            continue
+        async with get_lock(thread):
+            await graph.checkpointer.adelete_thread(thread)
+        count += 1
+    return count

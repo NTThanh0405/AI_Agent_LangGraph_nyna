@@ -1,24 +1,40 @@
 # app/telegram/handlers.py
 # Các handler của bot Telegram:
-#   /start /help /new /tuan /thang /dashboard /myid, tin nhắn thường, phản hồi tin lạ,
-#   và lệnh quản trị người dùng (/adduser /addadmin /removeadmin /removeuser /users).
-# Mọi tin nhắn đi qua AllowlistMiddleware trước: chỉ chat riêng, chỉ người có trong bảng
-# agent_state.users (PostgreSQL), bỏ qua tin quá cũ. Người lạ bị im lặng bỏ qua (chỉ ghi log),
-# trừ lệnh /myid để họ lấy được Telegram ID gửi cho quản trị viên.
-# Lệnh quản trị là code cố định, không đi qua LLM.
+#   /start /help /new /sessions /tuan /thang /dashboard /myid, tin nhắn thường, phản hồi tin lạ,
+#   nút bấm trong /sessions (chuyển/xoá phiên), và lệnh quản trị người dùng
+#   (/adduser /addadmin /removeadmin /removeuser /users).
+# Mọi tin nhắn và nút bấm đi qua middleware trước: chỉ chat riêng, chỉ người có trong bảng
+# agent_state.users (PostgreSQL), tin nhắn quá cũ bị bỏ qua. Người lạ bị im lặng bỏ qua (chỉ ghi
+# log), trừ lệnh /myid để họ lấy được Telegram ID gửi cho quản trị viên.
+# Lệnh quản trị và quản lý phiên là code cố định, không đi qua LLM.
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
+from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware, F, Router
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.agent.permissions import ROLE_TABLES
 from app.agent.runner import MSG_BUSY, run_turn
-from app.agent.sessions import get_lock, is_busy, reset, thread_for
+from app.agent.sessions import (
+    create_session,
+    delete_own_session,
+    is_busy,
+    list_sessions,
+    peek_active,
+    purge_user_sessions,
+    reuse_empty_active,
+    session_expires_at,
+    switch_session,
+)
+from app.audit import log_turn
+from app.config import get_settings
 from app.telegram.auth import (
     ADMIN,
     OWNER,
@@ -42,6 +58,8 @@ logger = logging.getLogger(__name__)
 # Tin nhắn gửi lúc bot đang tắt: quá cũ thì bỏ qua thay vì trả lời muộn hàng giờ.
 STALE_AFTER_SECONDS = 600
 
+_cfg = get_settings()
+
 HELP_TEXT = (
     "Mình là trợ lý phân tích dữ liệu kinh doanh. Bạn cứ hỏi tự nhiên, ví dụ:\n"
     "• Doanh thu tuần này thế nào?\n"
@@ -53,8 +71,10 @@ HELP_TEXT = (
     "/thang - tình hình kinh doanh tháng này\n"
     "/dashboard - dashboard doanh thu tuần này\n"
     "/new - bắt đầu cuộc trò chuyện mới\n"
+    "/sessions - xem, chuyển hoặc xoá các cuộc trò chuyện\n"
     "/help - xem hướng dẫn\n\n"
-    "Lưu ý: mình chỉ nhớ ngữ cảnh cuộc trò chuyện trong 3 ngày."
+    f"Lưu ý: mỗi người giữ tối đa {_cfg.max_sessions_per_user} cuộc trò chuyện; cuộc nào "
+    f"{_cfg.session_idle_days} ngày không dùng sẽ bị xoá."
 )
 
 ADMIN_HELP_TEXT = (
@@ -63,7 +83,7 @@ ADMIN_HELP_TEXT = (
     "/adduser <id> <role> [tên] - thêm nhân viên hoặc đổi role\n"
     "/addadmin <id> <role> [tên] - thêm hoặc nâng lên admin\n"
     "/removeadmin <id> - gỡ quyền admin\n"
-    "/removeuser <id> - xóa người dùng"
+    "/removeuser <id> - xóa người dùng (và toàn bộ cuộc trò chuyện của họ)"
 )
 
 PROMPT_WEEK = (
@@ -123,13 +143,36 @@ class AllowlistMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+class CallbackAllowlistMiddleware(BaseMiddleware):
+    """Như AllowlistMiddleware nhưng cho nút bấm: chỉ chat riêng, chỉ người có trong bảng users."""
+
+    async def __call__(
+        self,
+        handler: Callable[[CallbackQuery, dict[str, Any]], Awaitable[Any]],
+        event: CallbackQuery,
+        data: dict[str, Any],
+    ) -> Any:
+        if event.message is None or event.message.chat.type != ChatType.PRIVATE:
+            return None
+        try:
+            user = await get_allowed_user(data["pool"], event.from_user.id)
+        except Exception:
+            logger.exception("Không tra được người dùng trong database")
+            return None
+        if user is None:
+            return None
+        data["user"] = user
+        return await handler(event, data)
+
+
 # ---------------------------------------------------------------- hỏi đáp với agent
 
-async def _ask(message: Message, user: AllowedUser, graph, text: str) -> None:
-    """Gửi một câu hỏi cho agent và trả lời người dùng."""
+async def _ask(message: Message, user: AllowedUser, graph, pool, text: str) -> None:
+    """Gửi một câu hỏi cho agent, ghi audit_log và trả lời người dùng."""
     uid = str(user.telegram_id)
 
-    if is_busy(thread_for(uid)):
+    active = await peek_active(pool, uid)
+    if active and is_busy(active):
         await message.answer(MSG_BUSY)
         return
 
@@ -138,11 +181,24 @@ async def _ask(message: Message, user: AllowedUser, graph, text: str) -> None:
         await message.answer(blocked)
         return
 
+    started = time.monotonic()
     async with progress(message):
-        result = await run_turn(graph, user_id=uid, role=user.role, message=text)
+        result = await run_turn(graph, pool, user_id=uid, role=user.role, message=text)
+
+    await log_turn(
+        pool,
+        user_id=uid,
+        role=user.role,
+        question=text,
+        status="ok" if result.ok else ("busy" if result.busy else "error"),
+        duration_ms=int((time.monotonic() - started) * 1000),
+        thread_id=result.thread or None,
+    )
 
     if result.session_reset:
-        await message.answer("Cuộc trò chuyện trước đã hết hạn nên mình bắt đầu cuộc mới.")
+        await message.answer(
+            "Cuộc trò chuyện trước đã kết thúc (hết hạn hoặc bị lỗi) nên mình bắt đầu cuộc mới."
+        )
     await send_text(message, result.answer)
 
 
@@ -162,31 +218,128 @@ async def cmd_help(message: Message, user: AllowedUser) -> None:
     await message.answer(text)
 
 
-async def cmd_new(message: Message, user: AllowedUser, graph) -> None:
-    thread = thread_for(user.telegram_id)
-    if is_busy(thread):
+async def cmd_new(message: Message, user: AllowedUser, graph, pool) -> None:
+    uid = str(user.telegram_id)
+    active = await peek_active(pool, uid)
+    if active and is_busy(active):
         await message.answer("Mình đang xử lý câu trước, đợi xong rồi gõ /new nhé.")
         return
     try:
-        async with get_lock(thread):
-            await reset(graph, thread)
+        # Phiên hiện tại còn trống thì dùng luôn, tránh gõ /new nhiều lần đẩy phiên thật ra ngoài
+        if await reuse_empty_active(pool, uid):
+            await message.answer("Bạn đang ở một cuộc trò chuyện mới rồi, cứ hỏi nhé.")
+            return
+        _, evicted = await create_session(graph, pool, uid)
     except Exception:
-        logger.exception("Không xoá được hội thoại (thread=%s)", thread)
-        await message.answer("Chưa xoá được hội thoại, bạn thử lại sau nhé.")
+        logger.exception("Không tạo được phiên mới (user_id=%s)", uid)
+        await message.answer("Chưa tạo được cuộc trò chuyện mới, bạn thử lại sau nhé.")
         return
-    await message.answer("Đã bắt đầu cuộc trò chuyện mới. Bạn muốn xem gì?")
+    text = "Đã bắt đầu cuộc trò chuyện mới. Bạn muốn xem gì?"
+    if evicted:
+        text += (
+            f"\n(Đã xoá cuộc ít dùng nhất do chỉ giữ tối đa {get_settings().max_sessions_per_user} cuộc. "
+            "Gõ /sessions để xem các cuộc còn lại.)"
+        )
+    await message.answer(text)
 
 
-async def cmd_week(message: Message, user: AllowedUser, graph) -> None:
-    await _ask(message, user, graph, PROMPT_WEEK)
+async def cmd_week(message: Message, user: AllowedUser, graph, pool) -> None:
+    await _ask(message, user, graph, pool, PROMPT_WEEK)
 
 
-async def cmd_month(message: Message, user: AllowedUser, graph) -> None:
-    await _ask(message, user, graph, PROMPT_MONTH)
+async def cmd_month(message: Message, user: AllowedUser, graph, pool) -> None:
+    await _ask(message, user, graph, pool, PROMPT_MONTH)
 
 
-async def cmd_dashboard(message: Message, user: AllowedUser, graph) -> None:
-    await _ask(message, user, graph, PROMPT_DASHBOARD)
+async def cmd_dashboard(message: Message, user: AllowedUser, graph, pool) -> None:
+    await _ask(message, user, graph, pool, PROMPT_DASHBOARD)
+
+
+# ---------------------------------------------------------------- quản lý phiên (/sessions)
+
+def _fmt(dt: datetime) -> str:
+    return dt.astimezone(ZoneInfo(get_settings().timezone)).strftime("%d/%m %H:%M")
+
+
+def _render_sessions(rows: list[dict]) -> tuple[str, InlineKeyboardMarkup | None]:
+    if not rows:
+        return "Bạn chưa có cuộc trò chuyện nào. Cứ nhắn câu hỏi hoặc gõ /new.", None
+    lines = [
+        f"Cuộc trò chuyện của bạn (tối đa {get_settings().max_sessions_per_user}), "
+        "▶ là cuộc đang dùng:"
+    ]
+    keyboard = []
+    for i, r in enumerate(rows, 1):
+        title = r["title"] or "(chưa có nội dung)"
+        lines.append(
+            f"\n{i}. {'▶ ' if r['is_active'] else ''}{title}\n"
+            f"   dùng lần cuối {_fmt(r['last_active'])} · hết hạn {_fmt(session_expires_at(r))}"
+        )
+        keyboard.append([
+            InlineKeyboardButton(
+                text=f"{'✅ ' if r['is_active'] else ''}{i}. {title[:25]}",
+                callback_data=f"sw:{r['thread_id']}",
+            ),
+            InlineKeyboardButton(text="🗑", callback_data=f"del:{r['thread_id']}"),
+        ])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+async def cmd_sessions(message: Message, user: AllowedUser, pool) -> None:
+    text, markup = _render_sessions(await list_sessions(pool, user.telegram_id))
+    await message.answer(text, reply_markup=markup)
+
+
+async def _refresh_sessions(cb: CallbackQuery, pool, user_id: int) -> None:
+    text, markup = _render_sessions(await list_sessions(pool, user_id))
+    try:
+        await cb.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest:
+        pass  # nội dung không đổi
+
+
+async def on_session_button(cb: CallbackQuery, user: AllowedUser, graph, pool) -> None:
+    """Nút trong /sessions: sw = chuyển, del = hỏi xác nhận xoá, cf = xoá, bk = quay lại."""
+    action, _, thread = (cb.data or "").partition(":")
+    uid = user.telegram_id
+
+    if action == "sw":
+        if await switch_session(pool, uid, thread):
+            await cb.answer("Đã chuyển cuộc trò chuyện.")
+        else:
+            await cb.answer("Cuộc trò chuyện này không còn tồn tại.", show_alert=True)
+        await _refresh_sessions(cb, pool, uid)
+
+    elif action == "del":
+        row = next((r for r in await list_sessions(pool, uid) if r["thread_id"] == thread), None)
+        if row is None:
+            await cb.answer("Cuộc trò chuyện này không còn tồn tại.", show_alert=True)
+            await _refresh_sessions(cb, pool, uid)
+            return
+        confirm = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Xoá", callback_data=f"cf:{thread}"),
+            InlineKeyboardButton(text="Huỷ", callback_data="bk:"),
+        ]])
+        title = row["title"] or "(chưa có nội dung)"
+        try:
+            await cb.message.edit_text(f"Xoá cuộc trò chuyện “{title}”?", reply_markup=confirm)
+        except TelegramBadRequest:
+            pass
+        await cb.answer()
+
+    elif action == "cf":
+        status = await delete_own_session(graph, pool, uid, thread)
+        notice = {
+            "ok": "Đã xoá cuộc trò chuyện.",
+            "busy": "Cuộc này đang xử lý câu hỏi, thử lại sau.",
+            "not_found": "Cuộc trò chuyện này không còn tồn tại.",
+        }[status]
+        await cb.answer(notice, show_alert=status != "ok")
+        await _refresh_sessions(cb, pool, uid)
+
+    else:  # "bk"
+        await cb.answer()
+        await _refresh_sessions(cb, pool, uid)
 
 
 # ---------------------------------------------------------------- lệnh quản trị
@@ -240,7 +393,8 @@ async def cmd_removeadmin(message: Message, command: CommandObject, user: Allowe
     await message.answer("Đã gỡ quyền admin." if ok else "Người này không phải admin.")
 
 
-async def cmd_removeuser(message: Message, command: CommandObject, user: AllowedUser, pool) -> None:
+async def cmd_removeuser(message: Message, command: CommandObject, user: AllowedUser,
+                         graph, pool) -> None:
     if not user.is_admin:
         return
     arg = (command.args or "").strip()
@@ -253,9 +407,20 @@ async def cmd_removeuser(message: Message, command: CommandObject, user: Allowed
         await message.answer(err)
         return
     ok = await remove_user(pool, tid)
-    if ok:
-        await log_change(pool, user.telegram_id, f"remove {tid}")
-    await message.answer("Đã xóa." if ok else "Không có người dùng này.")
+    if not ok:
+        await message.answer("Không có người dùng này.")
+        return
+    # Người đã bị xoá thì dữ liệu hội thoại của họ cũng không nên nằm lại đến hết hạn
+    try:
+        purged = await purge_user_sessions(graph, pool, tid)
+    except Exception:
+        logger.exception("Không xoá hết phiên của người dùng %s", tid)
+        purged = -1
+    await log_change(pool, user.telegram_id, f"remove {tid} (xoá {purged} phiên)")
+    await message.answer(
+        "Đã xóa." if purged >= 0
+        else "Đã xóa người dùng, nhưng chưa xoá hết hội thoại của họ (hệ thống sẽ tự dọn khi hết hạn)."
+    )
 
 
 async def cmd_users(message: Message, user: AllowedUser, pool) -> None:
@@ -275,8 +440,8 @@ async def on_unknown_command(message: Message, user: AllowedUser) -> None:
     await message.answer("Mình chưa có lệnh này. Gõ /help để xem hướng dẫn.")
 
 
-async def on_text(message: Message, user: AllowedUser, graph) -> None:
-    await _ask(message, user, graph, message.text)
+async def on_text(message: Message, user: AllowedUser, graph, pool) -> None:
+    await _ask(message, user, graph, pool, message.text)
 
 
 async def on_other(message: Message, user: AllowedUser) -> None:
@@ -287,10 +452,12 @@ def build_router() -> Router:
     """Tạo router mới (thứ tự đăng ký quan trọng: lệnh trước, tin thường sau)."""
     router = Router(name="telegram-main")
     router.message.outer_middleware(AllowlistMiddleware())
+    router.callback_query.outer_middleware(CallbackAllowlistMiddleware())
     router.message.register(cmd_myid, Command("myid"))
     router.message.register(cmd_start, CommandStart())
     router.message.register(cmd_help, Command("help"))
     router.message.register(cmd_new, Command("new"))
+    router.message.register(cmd_sessions, Command("sessions"))
     router.message.register(cmd_week, Command("tuan"))
     router.message.register(cmd_month, Command("thang"))
     router.message.register(cmd_dashboard, Command("dashboard"))
@@ -303,4 +470,8 @@ def build_router() -> Router:
     router.message.register(on_unknown_command, F.text.startswith("/"))
     router.message.register(on_text, F.text)
     router.message.register(on_other)
+    # Nút bấm trong /sessions
+    router.callback_query.register(
+        on_session_button, F.data.startswith(("sw:", "del:", "cf:", "bk:"))
+    )
     return router

@@ -1,9 +1,9 @@
 # app/main.py
 # Điểm khởi động của dịch vụ. Khi khởi động: cấu hình log, mở pool PostgreSQL chỉ-đọc (dữ liệu
-# kinh doanh) và pool ghi cho database agent_app (người dùng, hội thoại, audit), tạo bảng
-# người dùng và nạp owner đầu tiên nếu bảng còn trống, dựng checkpointer PostgresSaver,
-# compile graph một lần và chạy các tác vụ nền (bot Telegram, dọn phiên hết hạn, dọn dashboard
-# hết hạn, dọn hội thoại/audit cũ). FastAPI chỉ còn phục vụ health check cho Docker HEALTHCHECK.
+# kinh doanh) và pool ghi cho database agent_app (người dùng, phiên, hội thoại, audit), tạo bảng
+# người dùng/phiên/audit và nạp owner đầu tiên nếu bảng còn trống, dựng checkpointer
+# PostgresSaver, compile graph một lần và chạy các tác vụ nền (bot Telegram, dọn dashboard hết
+# hạn, dọn phiên/audit cũ). FastAPI chỉ còn phục vụ health check cho Docker HEALTHCHECK.
 # Khi tắt thì dừng các tác vụ nền và đóng pool.
 
 import asyncio
@@ -18,11 +18,11 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from app.agent.graph import build_graph
-from app.agent.tools import ALL_TOOLS
 from app.agent.retention import purge_loop
-from app.agent.sessions import sweep_loop
+from app.agent.tools import ALL_TOOLS
 from app.agent.tools.dashboard_tools import cleanup_loop as dashboard_cleanup_loop
 from app.api.v1.router import api_router
+from app.audit import init_audit
 from app.config import get_settings
 from app.db.pool import close_pool, init_pool
 from app.telegram.auth import init_users
@@ -61,7 +61,7 @@ async def lifespan(app: FastAPI):
     try:
         async with AsyncExitStack() as stack:
             # Pool ghi tới agent_app (role agent_checkpoint). Các tham số này do
-            # AsyncPostgresSaver yêu cầu; dict_row để auth.py/retention.py đọc row["cột"].
+            # AsyncPostgresSaver yêu cầu; dict_row để auth.py/sessions.py/retention.py đọc row["cột"].
             cp_pool = AsyncConnectionPool(
                 conninfo=settings.checkpoint_database_url.get_secret_value(),
                 min_size=1,
@@ -74,7 +74,8 @@ async def lifespan(app: FastAPI):
 
             checkpointer = AsyncPostgresSaver(cp_pool)
             await checkpointer.setup()  # tạo bảng checkpoint nếu chưa có
-            await init_users(cp_pool)  # tạo bảng users; nạp users_seed.yaml nếu còn trống
+            await init_users(cp_pool)  # tạo bảng users + chat_sessions; nạp users_seed.yaml nếu trống
+            await init_audit(cp_pool)  # tạo/bổ sung cột bảng audit_log
             logger.info("Hội thoại và người dùng được lưu trong PostgreSQL (agent_app)")
 
             app.state.graph = build_graph(ALL_TOOLS, checkpointer)
@@ -86,8 +87,8 @@ async def lifespan(app: FastAPI):
             bot_task.add_done_callback(_on_bot_done)
             tasks = [
                 bot_task,
-                asyncio.create_task(sweep_loop(app.state.graph)),
                 asyncio.create_task(dashboard_cleanup_loop()),
+                # Dọn phiên hết hạn + checkpoint mồ côi + audit quá 30 ngày, chạy mỗi giờ
                 asyncio.create_task(purge_loop(cp_pool, app.state.graph)),
             ]
             try:

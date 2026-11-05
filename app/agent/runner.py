@@ -1,20 +1,21 @@
 # app/agent/runner.py
-# Chạy MỘT lượt hỏi của agent cho một người dùng: khoá theo thread, kiểm tra phiên hết hạn,
-# chạy graph có giới hạn bước và thời gian, rồi trả câu trả lời dạng chữ.
-# Telegram hay HTTP, nên bot (hoặc kênh khác sau này) gọi chung một chỗ.
-# Lượt lỗi, quá hạn hoặc vượt giới hạn bước thì phiên bị xoá để không để lại hội thoại
-# dở dang (tool_use chưa có kết quả) làm hỏng các lượt sau.
+# Chạy MỘT lượt hỏi của agent cho một người dùng: lấy phiên hiện tại (hoặc mở phiên mới),
+# khoá theo thread, chạy graph có giới hạn bước và thời gian, rồi trả câu trả lời dạng chữ.
+# Telegram hay kênh khác sau này đều gọi chung một chỗ.
+# Lượt lỗi, quá thời gian hoặc vượt giới hạn bước thì phiên bị xoá để không để lại hội thoại
+# dở dang (tool_use chưa có kết quả) làm hỏng các lượt sau. Lần nhắn kế tiếp
+# get_or_create_active tự mở phiên mới (session_reset=True).
 
 import asyncio
 import logging
 import time
 from dataclasses import dataclass
 
-from langchain_core.messages import HumanMessage
 import anthropic
+from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 
-from app.agent.sessions import get_lock, reset, thread_for, touch
+from app.agent.sessions import get_lock, get_or_create_active, reset, touch_session
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,8 @@ class TurnResult:
     answer: str
     ok: bool = True              # False nếu là thông báo lỗi/bận
     busy: bool = False           # thread đang có lượt khác chạy
-    session_reset: bool = False  # phiên cũ vừa hết hạn nên đã bắt đầu hội thoại mới
+    session_reset: bool = False  # phiên cũ đã hết hạn/bị xoá nên đã mở phiên mới
+    thread: str = ""             # phiên đã dùng cho lượt này (để ghi audit_log)
 
 
 def extract_text(content) -> str:
@@ -58,23 +60,29 @@ def _llm_unavailable(exc: Exception) -> bool:
     )
 
 
-async def _safe_reset(graph, thread: str) -> None:
+async def _safe_reset(graph, pool, thread: str) -> None:
     try:
-        await reset(graph, thread)
+        await reset(graph, pool, thread)
     except Exception:
         logger.exception("Không xoá được phiên %s sau lỗi", thread)
 
 
-async def run_turn(graph, *, user_id: str, role: str, message: str) -> TurnResult:
+async def run_turn(graph, pool, *, user_id: str, role: str, message: str) -> TurnResult:
     """Chạy một lượt hỏi. Không raise: mọi lỗi được đổi thành TurnResult(ok=False)."""
     settings = get_settings()
-    thread = thread_for(user_id)
+
+    try:
+        # Phiên hiện tại của người dùng; chưa có hoặc đã bị xoá thì mở phiên mới.
+        thread, session_reset = await get_or_create_active(graph, pool, user_id)
+    except Exception:
+        logger.exception("Không lấy/tạo được phiên (user_id=%s)", user_id)
+        return TurnResult(MSG_ERROR, ok=False)
 
     lock = get_lock(thread)
     if lock.locked():
-        return TurnResult(MSG_BUSY, ok=False, busy=True)
+        return TurnResult(MSG_BUSY, ok=False, busy=True, thread=thread)
 
-    # role do server tra từ allowlist (app/telegram/auth.py), không lấy từ nội dung tin nhắn.
+    # role do server tra từ bảng users (app/telegram/auth.py), không lấy từ nội dung tin nhắn.
     config = {
         "configurable": {
             "thread_id": thread,
@@ -84,7 +92,7 @@ async def run_turn(graph, *, user_id: str, role: str, message: str) -> TurnResul
         "recursion_limit": settings.graph_max_steps,
     }
     initial_state = {
-        "messages": [HumanMessage(content=message, additional_kwargs={"ts": time.time()})],
+        "messages": [HumanMessage(content=message)],
         "user_id": user_id,
         "user_role": role,
     }
@@ -92,25 +100,33 @@ async def run_turn(graph, *, user_id: str, role: str, message: str) -> TurnResul
     started = time.monotonic()
     async with lock:
         try:
-            session_reset = await touch(graph, thread)
+            await touch_session(pool, thread, message)  # cập nhật last_active + đặt tiêu đề
             async with asyncio.timeout(settings.invoke_timeout_seconds):
                 result = await graph.ainvoke(initial_state, config)
         except GraphRecursionError:
             logger.warning("Vượt giới hạn bước (thread=%s)", thread)
-            await _safe_reset(graph, thread)
-            return TurnResult(MSG_TOO_COMPLEX, ok=False)
+            await _safe_reset(graph, pool, thread)
+            return TurnResult(MSG_TOO_COMPLEX, ok=False, thread=thread)
         except TimeoutError:
             logger.warning("Quá thời gian %ss (thread=%s)", settings.invoke_timeout_seconds, thread)
-            await _safe_reset(graph, thread)
-            return TurnResult(MSG_TIMEOUT, ok=False)
+            await _safe_reset(graph, pool, thread)
+            return TurnResult(MSG_TIMEOUT, ok=False, thread=thread)
         except Exception as e:
-            await _safe_reset(graph, thread)
+            await _safe_reset(graph, pool, thread)
             if _llm_unavailable(e):
                 logger.warning("Anthropic không sẵn sàng (thread=%s): %s", thread, e)
-                return TurnResult(MSG_LLM_UNAVAILABLE, ok=False)
+                return TurnResult(MSG_LLM_UNAVAILABLE, ok=False, thread=thread)
             logger.exception("Agent error (thread=%s)", thread)
-            return TurnResult(MSG_ERROR, ok=False)
+            return TurnResult(MSG_ERROR, ok=False, thread=thread)
 
     answer = extract_text(result["messages"][-1].content).strip()
-    logger.info("Lượt hỏi xong (user_id=%s, role=%s, %.1fs)", user_id, role, time.monotonic() - started)
-    return TurnResult(answer or MSG_EMPTY, ok=bool(answer), session_reset=session_reset)
+    logger.info(
+        "Lượt hỏi xong (user_id=%s, role=%s, thread=%s, %.1fs)",
+        user_id, role, thread, time.monotonic() - started,
+    )
+    return TurnResult(
+        answer or MSG_EMPTY,
+        ok=bool(answer),
+        session_reset=session_reset,
+        thread=thread,
+    )

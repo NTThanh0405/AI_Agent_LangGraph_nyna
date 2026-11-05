@@ -41,7 +41,6 @@ class Settings(BaseSettings):
     # ---- Telegram bot ----
     rate_limit_per_min: int = 5      # số câu hỏi tối đa mỗi phút cho mỗi người
     rate_limit_per_day: int = 100    # số câu hỏi tối đa mỗi ngày cho mỗi người
-    session_ttl_minutes: int = 4320  # 3 ngày; im lặng quá thời gian này thì xoá hội thoại (sessions.py)
     db_host: str = "localhost"
     db_port: int = 5432
     db_name: str = "NynaGroup"
@@ -53,6 +52,13 @@ class Settings(BaseSettings):
     db_pool_max: int = 5
     db_statement_timeout_ms: int = 15000
     db_max_rows: int = 200
+
+    # ---- Phiên chat và lưu trữ (app/agent/sessions.py, retention.py) ----
+    max_sessions_per_user: int = 5      # số phiên tối đa mỗi người; vượt thì xoá phiên ít dùng nhất
+    session_idle_days: int = 7          # phiên không dùng quá số ngày này thì xoá
+    session_max_days: int = 14          # trần tuyệt đối kể từ lúc tạo phiên
+    session_title_max_chars: int = 40   # độ dài tiêu đề phiên (lấy từ câu hỏi đầu tiên)
+    audit_retention_days: int = 30      # số ngày giữ audit_log
 
     # ---- Dashboard ----
     # "file": bot gửi file HTML qua Telegram. "link": ghi file vào dashboard_dir,
