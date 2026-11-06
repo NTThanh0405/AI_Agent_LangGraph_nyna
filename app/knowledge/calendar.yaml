@@ -1,0 +1,122 @@
+# app/agent/knowledge/calendar.yaml
+# Lịch sự kiện đặc biệt ảnh hưởng doanh số. Agent đọc file này (qua context_tools.py)
+# để giải thích biến động khi so sánh hai kỳ, thay vì đoán nguyên nhân.
+#
+# Quy ước:
+#   - Ngày theo định dạng ISO YYYY-MM-DD, giờ Việt Nam; start và end đều tính (gồm cả hai đầu).
+#   - Sự kiện một ngày thì start = end.
+#   - type: holiday (nghỉ lễ) | shopping (dịp mua sắm) | promotion (khuyến mãi của công ty)
+#           | operations (thay đổi vận hành: đóng cửa, khai trương, sửa chữa, hết hàng...)
+#   - impact: tác động dự kiến lên doanh số; scope: kênh/cửa hàng bị ảnh hưởng (all nếu toàn hệ thống).
+#   - verified: false nếu ngày chỉ là ước tính, cần xác nhận lại (ví dụ lịch nghỉ lễ do nhà nước công bố sau).
+#   - Cập nhật thủ công mỗi khi có khuyến mãi hoặc dịp mới; thiếu thì agent sẽ thiếu bối cảnh.
+
+events:
+  # ------------------------------------------------------------ 2026
+  - name: Ngày Phụ nữ Việt Nam
+    start: 2026-10-20
+    end: 2026-10-20
+    type: shopping
+    impact: tăng sức mua quà tặng, mỹ phẩm, thời trang
+    scope: all
+    verified: true
+
+  - name: Ngày Nhà giáo Việt Nam
+    start: 2026-11-20
+    end: 2026-11-20
+    type: shopping
+    impact: tăng nhẹ nhóm quà tặng, hoa
+    scope: all
+    verified: true
+
+  - name: Ngày độc thân 11/11
+    start: 2026-11-11
+    end: 2026-11-11
+    type: shopping
+    impact: tăng mạnh đơn online do các sàn khuyến mãi lớn
+    scope: online
+    verified: true
+
+  - name: Black Friday
+    start: 2026-11-27
+    end: 2026-11-29
+    type: shopping
+    impact: tăng mạnh đơn online và giá trị đơn trung bình; tuần sau có thể giảm
+    scope: all
+    verified: true
+
+  - name: Ngày đôi 12/12
+    start: 2026-12-12
+    end: 2026-12-12
+    type: shopping
+    impact: tăng đơn online
+    scope: online
+    verified: true
+
+  - name: Giáng sinh
+    start: 2026-12-24
+    end: 2026-12-25
+    type: shopping
+    impact: tăng lượng khách tại cửa hàng, nhất là trung tâm thương mại
+    scope: all
+    verified: true
+
+  # ------------------------------------------------------------ 2027
+  - name: Tết Dương lịch
+    start: 2027-01-01
+    end: 2027-01-01
+    type: holiday
+    impact: lượng khách thay đổi theo vị trí cửa hàng
+    scope: all
+    verified: true
+
+  - name: Cao điểm mua sắm trước Tết Nguyên đán
+    start: 2027-01-20
+    end: 2027-02-04
+    type: shopping
+    impact: tăng mạnh doanh thu, giỏ hàng lớn hơn bình thường
+    scope: all
+    verified: false  # ước tính, điều chỉnh theo thực tế
+
+  - name: Tết Nguyên đán Đinh Mùi
+    start: 2027-02-04
+    end: 2027-02-10
+    type: holiday
+    impact: nhiều cửa hàng đóng hoặc giảm giờ mở cửa, doanh thu giảm mạnh; sau Tết hồi phục dần
+    scope: all
+    verified: false  # chờ lịch nghỉ chính thức do nhà nước công bố
+
+  - name: Valentine
+    start: 2027-02-14
+    end: 2027-02-14
+    type: shopping
+    impact: tăng quà tặng, hoa, mỹ phẩm
+    scope: all
+    verified: true
+
+  - name: Ngày Quốc tế Phụ nữ
+    start: 2027-03-08
+    end: 2027-03-08
+    type: shopping
+    impact: tăng sức mua quà tặng, mỹ phẩm, thời trang
+    scope: all
+    verified: true
+
+  # ------------------------------------------------------------ MẪU: sự kiện riêng của công ty
+  # Bỏ dấu # và điền thông tin thật. Các mục dưới đây chỉ là ví dụ, không phải dữ liệu thật.
+  #
+  # - name: Khuyến mãi tri ân khách hàng thân thiết
+  #   start: 2026-11-15
+  #   end: 2026-11-17
+  #   type: promotion
+  #   impact: giảm giá 20% cho hội viên; dự kiến tăng đơn nhưng giảm biên lợi nhuận
+  #   scope: all
+  #   verified: true
+  #
+  # - name: Đóng cửa sửa chữa cửa hàng A
+  #   start: 2026-11-09
+  #   end: 2026-11-12
+  #   type: operations
+  #   impact: doanh thu cửa hàng A bằng 0 trong thời gian đóng cửa
+  #   scope: "store: A"   # ghi mã hoặc tên cửa hàng đúng như trong dim_store
+  #   verified: true

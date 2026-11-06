@@ -1,10 +1,11 @@
 # app/agent/tools/dashboard_tools.py
 # Tool tạo dashboard HTML theo yêu cầu người dùng.
-# LLM chỉ mô tả dashboard: một tiêu đề chung + danh sách dashboard con (mỗi cái là một tab,
-# ví dụ "Doanh thu", "Kho"), mỗi dashboard con gồm các biểu đồ, mỗi biểu đồ một câu SELECT;
-# code tự chạy SQL (qua đúng check_select + phân quyền theo vai trò), đổ dữ liệu vào
-# template cố định, lưu file với tên ngẫu nhiên rồi trả MỘT link duy nhất (nhiều dashboard
-# thì chuyển qua lại bằng tab trong trang). LLM không tự viết HTML.
+# LLM chỉ MÔ TẢ dashboard: một tiêu đề chung + danh sách dashboard con (mỗi cái là một tab,
+# ví dụ "Doanh thu", "Kho"). Mỗi dashboard con gồm: một preset (bố cục mẫu), MỘT câu SELECT
+# trả dataset chi tiết, và (nếu không dùng preset) danh sách bộ lọc, KPI, biểu đồ.
+# Code tự chạy SQL (qua đúng check_select + phân quyền theo vai trò), nhúng dataset vào
+# template cố định; việc lọc và cộng gộp diễn ra ngay trên trình duyệt của người xem.
+# Lưu file với tên ngẫu nhiên rồi trả MỘT link duy nhất. LLM không tự viết HTML.
 # File được ghi vào DASHBOARD_DIR (volume dùng chung); container dashboards-web (nginx)
 # đọc thư mục đó để phục vụ link. Số file và dung lượng thư mục có giới hạn;
 # cleanup_loop xoá file quá DASHBOARD_TTL_HOURS.
@@ -24,9 +25,15 @@ from typing import Literal, Optional
 import psycopg
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.agent.permissions import PermissionDenied, ensure_access
+from app.agent.tools.dashboard_presets import (
+    describe_presets,
+    get_preset,
+    get_theme,
+    preset_names,
+)
 from app.agent.tools.dashboard_template import TEMPLATE
 from app.agent.tools.sql_tools import _caller
 from app.config import get_settings
@@ -36,52 +43,90 @@ from app.db.pool import get_pool
 logger = logging.getLogger(__name__)
 
 VN_TZ = timezone(timedelta(hours=7))
-MAX_CHART_POINTS = 60
 MAX_FILES = 500
 MAX_TOTAL_BYTES = 200 * 1024 * 1024
 CLEANUP_INTERVAL_SECONDS = 300
-MAX_DASHBOARDS = 6        # số tab tối đa trong một link
-MAX_TOTAL_CHARTS = 24     # tổng số biểu đồ tối đa của toàn bộ link (mỗi biểu đồ là một truy vấn)
+MAX_DASHBOARDS = 6          # số tab tối đa trong một link
+MAX_DATASET_ROWS = 10_000   # số dòng dataset tối đa của MỘT tab (dữ liệu nhúng vào file)
+MAX_TOTAL_ROWS = 30_000     # tổng số dòng dataset của toàn bộ link
+
+
+class FilterSpec(BaseModel):
+    """Một ô bộ lọc trên đầu dashboard."""
+
+    label: str = Field(max_length=30, description="Nhãn hiển thị, ví dụ 'Cửa hàng'")
+    column: str = Field(max_length=64, description="Cột của dataset dùng để lọc")
+    type: Literal["select", "date"] = Field(
+        default="select",
+        description="select: danh sách chọn; date: khoảng ngày (cột phải là kiểu ngày)",
+    )
+
+
+class KpiSpec(BaseModel):
+    """Một thẻ số liệu lớn, tự so sánh với kỳ trước nếu dataset có cột ky."""
+
+    label: str = Field(max_length=40)
+    column: str = Field(max_length=64, description="Cột số của dataset")
+    agg: Literal["sum", "avg", "ratio"] = Field(
+        default="sum", description="ratio = tổng(column) / tổng(denom), ví dụ AOV"
+    )
+    denom: Optional[str] = Field(default=None, max_length=64, description="Cột mẫu số khi agg=ratio")
+    format: Literal["number", "compact", "decimal"] = Field(
+        default="compact", description="number: 1.234; compact: 24.74M; decimal: 2.10"
+    )
+    good_when: Literal["up", "down"] = Field(
+        default="up", description="Tăng là tốt (xanh) hay giảm là tốt (ví dụ tỷ lệ huỷ)"
+    )
 
 
 class ChartSpec(BaseModel):
-    """Mô tả một biểu đồ trong dashboard."""
+    """Mô tả một biểu đồ; dữ liệu được cộng gộp từ dataset theo bộ lọc."""
 
     title: str = Field(max_length=120, description="Tiêu đề biểu đồ, ngắn gọn")
     type: Literal["bar", "line", "pie", "table"] = Field(
         description="bar: cột; line: đường (theo thời gian); pie: tròn (tỷ trọng); table: bảng số liệu"
     )
-    sql: str = Field(
-        max_length=4000,
-        description="MỘT câu SELECT PostgreSQL nhẹ, đã GROUP BY sẵn, đặt alias cột rõ ràng. "
-        "Luôn ghi tên bảng dạng dwh.<bảng>. Biểu đồ line: luôn ORDER BY cột x tăng dần.",
-    )
     x: Optional[str] = Field(
-        default=None,
-        max_length=64,
-        description="Tên cột làm nhãn (trục X của bar/line, tên lát cắt của pie). Không cần với table.",
+        default=None, max_length=64,
+        description="Cột nhãn (trục X; tên lát cắt của pie). table: cột nhóm, bỏ trống để xem dòng thô.",
     )
-    y: list[str] = Field(
-        default_factory=list,
-        max_length=6,
-        description="Tên các cột SỐ làm giá trị. pie chỉ dùng cột đầu. Không cần với table.",
+    x_order: Optional[str] = Field(
+        default=None, max_length=64,
+        description="Cột số quyết định thứ tự của x (ví dụ thu_stt cho T2..CN). Bỏ trống = sắp theo chữ.",
     )
+    y: list[str] = Field(default_factory=list, max_length=6, description="Các cột SỐ làm giá trị. pie chỉ dùng cột đầu.")
+    agg: Literal["sum", "avg", "ratio"] = "sum"
+    denom: Optional[str] = Field(default=None, max_length=64, description="Cột mẫu số khi agg=ratio")
+    compare: bool = Field(default=False, description="Vẽ thêm series kỳ trước (cần cột ky trong dataset)")
+    color_by: Optional[str] = Field(
+        default=None, max_length=64,
+        description="Tách series và tô màu theo cột này (ví dụ ca sáng/ngày/đêm). Không dùng chung với compare.",
+    )
+    sort: Literal["none", "asc", "desc"] = Field(default="none", description="Sắp xếp theo giá trị của y đầu tiên")
+    span: int = Field(default=6, ge=1, le=12, description="Chiếm bao nhiêu trong 12 cột (12 = cả hàng)")
 
 
 class DashboardSpec(BaseModel):
     """Một dashboard con, hiển thị thành một tab trong trang."""
 
-    name: str = Field(
-        max_length=40,
-        description="Tên tab, ngắn gọn, ví dụ 'Doanh thu', 'Kho', 'Khách hàng'",
+    name: str = Field(max_length=40, description="Tên tab, ví dụ 'Tổng quan', 'Kho'")
+    preset: str = Field(
+        default="default",
+        description="Bố cục mẫu. Nếu dùng preset khác 'default' thì filters/kpis/charts có thể để trống.",
     )
-    charts: list[ChartSpec] = Field(
-        min_length=1, description="Các biểu đồ thuộc dashboard này"
+    theme: Optional[str] = Field(default=None, description="Bảng màu; bỏ trống = theo preset")
+    dataset_sql: str = Field(
+        max_length=6000,
+        description="MỘT câu SELECT PostgreSQL ở mức chi tiết (đã GROUP BY ngày/giờ/cửa hàng/...), "
+        "alias cột rõ ràng, tên bảng dạng dwh.<bảng>. Có cột ky ('nay'/'truoc') nếu cần so sánh kỳ trước.",
     )
+    filters: list[FilterSpec] = Field(default_factory=list, max_length=6)
+    kpis: list[KpiSpec] = Field(default_factory=list, max_length=6)
+    charts: list[ChartSpec] = Field(default_factory=list)
 
 
 class _ChartError(Exception):
-    """Lỗi do mô tả biểu đồ sai; trả lại cho LLM dạng chữ để tự sửa."""
+    """Lỗi do mô tả dashboard sai; trả lại cho LLM dạng chữ để tự sửa."""
 
 
 def _first_line(e: Exception) -> str:
@@ -103,58 +148,87 @@ def _json_value(v):
     return str(v)[:200]
 
 
-def _number(v, title: str, column: str):
-    if v is None:
-        return None
+def _resolve(d: DashboardSpec) -> dict:
+    """Ghép preset với phần LLM tự khai báo (LLM khai báo thì ưu tiên hơn preset)."""
     try:
-        f = float(v)
-    except (TypeError, ValueError):
-        raise _ChartError(f"biểu đồ '{title}': cột '{column}' không phải kiểu số")
-    return f if math.isfinite(f) else None
+        p = get_preset(d.preset)
+    except KeyError:
+        raise _ChartError(
+            f"dashboard '{d.name}': preset '{d.preset}' không tồn tại, các preset hiện có: "
+            + ", ".join(preset_names())
+        )
+    try:
+        filters = d.filters or [FilterSpec(**f) for f in p["filters"]]
+        kpis = d.kpis or [KpiSpec(**k) for k in p["kpis"]]
+        charts = d.charts or [ChartSpec(**c) for c in p["charts"]]
+    except ValidationError as e:
+        raise _ChartError(f"dashboard '{d.name}': khai báo preset lỗi: {_first_line(e)}")
+    if not charts:
+        raise _ChartError(f"dashboard '{d.name}': chưa có biểu đồ nào (hãy chọn preset hoặc khai báo charts)")
+    try:
+        theme = get_theme(d.theme or p["theme"])
+    except KeyError:
+        raise _ChartError(f"dashboard '{d.name}': theme '{d.theme}' không tồn tại")
+    return {"filters": filters, "kpis": kpis, "charts": charts, "theme": theme}
 
 
-async def _build_chart(conn, spec: ChartSpec, role: Optional[str], max_rows: int) -> dict:
-    """Chạy câu SELECT của một biểu đồ và đóng gói dữ liệu cho template."""
+def _validate(name: str, columns: list[str], rows: list, filters, kpis, charts) -> None:
+    """Mọi cột được nhắc tới phải có trong dataset; lỗi thì báo kèm danh sách cột."""
+    cols = set(columns)
+
+    def need(where: str, *names):
+        miss = [n for n in names if n and n not in cols]
+        if miss:
+            raise _ChartError(
+                f"dashboard '{name}', {where}: dataset thiếu cột {miss}. "
+                f"Các cột dataset_sql đang trả về: {columns}. "
+                "Hãy sửa dataset_sql (xem list_dashboard_presets) hoặc sửa tên cột."
+            )
+
+    for f in filters:
+        need(f"bộ lọc '{f.label}'", f.column)
+    for k in kpis:
+        if k.agg == "ratio" and not k.denom:
+            raise _ChartError(f"dashboard '{name}', KPI '{k.label}': agg=ratio cần denom")
+        need(f"KPI '{k.label}'", k.column, k.denom)
+    for c in charts:
+        where = f"biểu đồ '{c.title}'"
+        if c.type == "table":
+            need(where, c.x, c.x_order, c.denom, *c.y)
+            continue
+        if not c.x or not c.y:
+            raise _ChartError(f"dashboard '{name}', {where}: cần cả x và y")
+        if c.agg == "ratio" and not c.denom:
+            raise _ChartError(f"dashboard '{name}', {where}: agg=ratio cần denom")
+        need(where, c.x, c.x_order, c.color_by, c.denom, *c.y)
+        if c.compare and "ky" not in cols:
+            raise _ChartError(f"dashboard '{name}', {where}: compare cần cột ky ('nay'/'truoc') trong dataset")
+
+    if "ky" in cols:
+        iky = columns.index("ky")
+        bad = {r[iky] for r in rows} - {"nay", "truoc"}
+        if bad:
+            raise _ChartError(f"dashboard '{name}': cột ky chỉ được nhận 'nay' hoặc 'truoc', đang có {sorted(map(str, bad))}")
+
+
+async def _build_dataset(conn, name: str, sql: str, role: Optional[str]) -> dict:
+    """Chạy câu SELECT của một dashboard con và đóng gói dataset cho template."""
     try:
-        checked = check_select(spec.sql, max_rows)
+        checked = check_select(sql, MAX_DATASET_ROWS)
         ensure_access(role, checked.tables)
     except (UnsafeSQLError, PermissionDenied) as e:
-        raise _ChartError(f"biểu đồ '{spec.title}': câu SQL bị từ chối: {e}")
+        raise _ChartError(f"dashboard '{name}': câu SQL bị từ chối: {e}")
 
     cursor = await conn.execute(checked.sql)
     fetched = await cursor.fetchall()
-    truncated = len(fetched) > max_rows
-    rows = fetched[:max_rows]
-    columns = [c.name for c in cursor.description]
-
-    if spec.type == "table":
-        title = f"{spec.title} (chỉ hiển thị {max_rows} dòng đầu)" if truncated else spec.title
-        return {
-            "title": title, "type": "table", "columns": columns,
-            "rows": [[_json_value(v) for v in r] for r in rows],
-        }
-
-    if not spec.x or spec.x not in columns:
-        raise _ChartError(f"biểu đồ '{spec.title}': x phải là một trong các cột {columns}")
-    value_cols = spec.y[:1] if spec.type == "pie" else spec.y
-    if not value_cols or any(y not in columns for y in value_cols):
-        raise _ChartError(f"biểu đồ '{spec.title}': y phải là các cột số trong {columns}")
-    if truncated or len(rows) > MAX_CHART_POINTS:
+    if len(fetched) > MAX_DATASET_ROWS:
         raise _ChartError(
-            f"biểu đồ '{spec.title}': có hơn {MAX_CHART_POINTS} điểm dữ liệu, "
-            "hãy gom nhóm lại hoặc dùng ORDER BY ... LIMIT"
+            f"dashboard '{name}': dataset có hơn {MAX_DATASET_ROWS} dòng, "
+            "hãy GROUP BY thô hơn (ngày/giờ/cửa hàng/nền tảng) hoặc thu hẹp khoảng thời gian"
         )
-
-    ix = columns.index(spec.x)
-    labels = ["(trống)" if r[ix] is None else str(_json_value(r[ix])) for r in rows]
-    series = []
-    for y in value_cols:
-        iy = columns.index(y)
-        series.append({"name": y, "values": [_number(r[iy], spec.title, y) for r in rows]})
-    return {
-        "title": spec.title, "type": spec.type, "x_name": spec.x,
-        "labels": labels, "series": series,
-    }
+    columns = [c.name for c in cursor.description]
+    rows = [[_json_value(v) for v in r] for r in fetched]
+    return {"columns": columns, "rows": rows}
 
 
 def _dir_full(directory: Path) -> bool:
@@ -174,16 +248,31 @@ def _write_atomic(tmp: Path, final: Path, html: str) -> None:
 
 
 @tool
+def list_dashboard_presets() -> str:
+    """Liệt kê các preset dashboard mẫu, cột dataset_sql bắt buộc và SQL mẫu.
+
+    Gọi tool này TRƯỚC create_dashboard khi người dùng muốn một dashboard giống một mẫu có sẵn
+    (ví dụ 'tổng quan hiệu suất'), để viết dataset_sql trả đúng tên cột.
+    """
+    return describe_presets()
+
+
+@tool
 async def create_dashboard(
     title: str, dashboards: list[DashboardSpec], config: RunnableConfig
 ) -> str:
-    """Tạo trang dashboard HTML trực quan (biểu đồ cột/đường/tròn và bảng) rồi trả về MỘT LINK để xem.
+    """Tạo trang dashboard HTML trực quan (KPI, biểu đồ cột/đường/tròn, bảng, bộ lọc) rồi trả về MỘT LINK để xem.
 
     Chỉ dùng khi người dùng yêu cầu dashboard, biểu đồ hoặc báo cáo trực quan.
     Luôn gọi tool này ĐÚNG MỘT LẦN cho mỗi yêu cầu. Nếu người dùng muốn nhiều dashboard
     (ví dụ doanh thu và kho), đưa tất cả vào danh sách `dashboards`: mỗi phần tử là một tab
-    trong cùng một link, người xem tự chuyển qua lại. Chỉ có một dashboard thì không hiện tab.
-    Mỗi biểu đồ gồm một câu SELECT nhẹ, đã gom nhóm sẵn. Chỉ dùng bảng người dùng được phép xem.
+    trong cùng một link, mỗi tab có bộ lọc riêng. Chỉ có một dashboard thì không hiện tab.
+
+    Mỗi dashboard chỉ có MỘT dataset_sql (câu SELECT nhẹ, ở mức chi tiết, vài nghìn dòng trở xuống);
+    bộ lọc, KPI và biểu đồ cộng gộp từ dataset đó ngay trên trang. Muốn có KPI và biểu đồ
+    so sánh kỳ trước thì dataset có cột ky nhận 'nay' hoặc 'truoc'. Nên chọn preset
+    (xem list_dashboard_presets) rồi chỉ cần viết dataset_sql đúng cột; preset 'default' thì tự
+    khai báo filters, kpis, charts. Chỉ dùng bảng người dùng được phép xem.
     Dashboard là ảnh chụp số liệu lúc tạo và tự hết hạn sau một thời gian.
     """
     s = get_settings()
@@ -193,25 +282,35 @@ async def create_dashboard(
         return "Cần ít nhất một dashboard."
     if len(dashboards) > MAX_DASHBOARDS:
         return f"Tối đa {MAX_DASHBOARDS} dashboard trong một link, hãy giảm bớt."
-    if any(len(d.charts) > s.dashboard_max_charts for d in dashboards):
-        return f"Mỗi dashboard tối đa {s.dashboard_max_charts} biểu đồ, hãy giảm bớt."
-    total_charts = sum(len(d.charts) for d in dashboards)
-    if total_charts > MAX_TOTAL_CHARTS:
-        return f"Tổng cộng tối đa {MAX_TOTAL_CHARTS} biểu đồ trong một link, hãy giảm bớt."
 
     user_id, role = _caller(config)
     built = []
+    total_rows = 0
     try:
+        resolved = [_resolve(d) for d in dashboards]
+        for d, r in zip(dashboards, resolved):
+            if len(r["charts"]) > s.dashboard_max_charts:
+                return f"Mỗi dashboard tối đa {s.dashboard_max_charts} biểu đồ, hãy giảm bớt."
         # Mọi câu SQL của mọi tab đều đi qua check_select + ensure_access theo vai trò
         # của người tạo, nên file chỉ chứa dữ liệu mà người này được phép xem.
         async with get_pool().connection() as conn:
-            for d in dashboards:
-                charts = []
-                for spec in d.charts:
-                    charts.append(await _build_chart(conn, spec, role, s.db_max_rows))
-                built.append(
-                    {"name": d.name.strip()[:40] or f"Dashboard {len(built) + 1}", "charts": charts}
-                )
+            for d, r in zip(dashboards, resolved):
+                name = d.name.strip()[:40] or f"Dashboard {len(built) + 1}"
+                dataset = await _build_dataset(conn, name, d.dataset_sql, role)
+                total_rows += len(dataset["rows"])
+                if total_rows > MAX_TOTAL_ROWS:
+                    raise _ChartError(
+                        f"tổng dataset của các tab vượt {MAX_TOTAL_ROWS} dòng, hãy giảm bớt hoặc gom nhóm thô hơn"
+                    )
+                _validate(name, dataset["columns"], dataset["rows"], r["filters"], r["kpis"], r["charts"])
+                built.append({
+                    "name": name,
+                    "theme": r["theme"],
+                    "dataset": dataset,
+                    "filters": [f.model_dump() for f in r["filters"]],
+                    "kpis": [k.model_dump() for k in r["kpis"]],
+                    "charts": [c.model_dump() for c in r["charts"]],
+                })
     except _ChartError as e:
         return f"Không tạo được dashboard: {e}"
     except psycopg.errors.QueryCanceled:
@@ -253,8 +352,8 @@ async def create_dashboard(
         return "Không lưu được dashboard (lỗi ghi file). Hãy báo người quản trị."
 
     logger.info(
-        "Dashboard %s... (user_id=%s, role=%s, %d tab, %d biểu đồ)",
-        name[:8], user_id, role, len(built), total_charts
+        "Dashboard %s... (user_id=%s, role=%s, %d tab, %d dòng dữ liệu)",
+        name[:8], user_id, role, len(built), total_rows,
     )
     url = f"{s.dashboard_base_url.rstrip('/')}/{name}.html"
     return (

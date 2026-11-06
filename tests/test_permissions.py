@@ -48,27 +48,21 @@ def test_boss_cannot_read_other_schemas():
     assert not can_access("boss", "raw_ipos.events")
 
 
-def test_manager_allowed_tables():
-    for t in [
-        "dwh.fact_sales",
-        "dwh.fact_sale_items",
-        "dwh.fact_online_orders",
-        "dwh.dim_store",
-        "dwh.dim_customer",
-    ]:
-        assert can_access("manager", t), t
+def test_manager_same_as_boss():
+    assert ROLE_TABLES["manager"] == ROLE_TABLES["boss"]
 
 
-def test_manager_denied_tables():
-    for t in [
-        "dwh.fact_member_vouchers",
-        "dwh.fact_membership_transactions",
-        "dwh.fact_membership_type_changes",
-        "dwh.fact_hub_bills",
-        "dwh.fact_bookings",
-        "dwh.dim_voucher_campaign",
-    ]:
-        assert not can_access("manager", t), t
+@pytest.mark.parametrize("table", [
+    "dwh.fact_sales", "dwh.fact_member_vouchers", "dwh.fact_hub_bills",
+    "dwh.fact_bookings", "dwh.dim_voucher_campaign", "dwh.bang_moi_tao_sau_nay",
+])
+def test_manager_can_read_all_dwh(table):
+    assert can_access("manager", table)
+
+
+def test_manager_cannot_read_other_schemas():
+    assert not can_access("manager", "public.users")
+    assert not can_access("manager", "dwh_evil.fact_sales")
 
 
 # ----------------------------------------------------- tên bảng giả mạo / lạ

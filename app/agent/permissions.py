@@ -12,22 +12,7 @@ from typing import Iterable, Optional
 # kèm dim_customer đã che cột cá nhân); chưa cho xem hội viên và voucher. Sửa theo nhu cầu.
 ROLE_TABLES: dict[str, set[str]] = {
     "boss": {"dwh.*"},
-    "manager": {
-        "dwh.dim_store",
-        "dwh.dim_employee",
-        "dwh.dim_item",
-        "dwh.dim_channel",
-        "dwh.dim_promotion",
-        "dwh.dim_membership_type",
-        "dwh.dim_customer",
-        "dwh.fact_sales",
-        "dwh.fact_sale_items",
-        "dwh.fact_sale_payments",
-        "dwh.fact_online_orders",
-        "dwh.fact_online_order_items",
-        "dwh.fact_order_status_log",
-        "dwh.fact_item_stock_events",
-    },
+    "manager": {"dwh.*"},
 }
 
 
