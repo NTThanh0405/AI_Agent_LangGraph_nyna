@@ -49,8 +49,8 @@ class Period:
 
 # ---------------------------------------------------------------- tiện ích ngày
 
-def today_local(now: Optional[datetime] = None) -> date:
-    """Ngày hôm nay theo giờ Việt Nam (đọc múi giờ từ settings nếu có)."""
+def _tz() -> ZoneInfo:
+    """Múi giờ của hệ thống (đọc từ settings nếu có, không thì UTC+7)."""
     tz_name = DEFAULT_TZ
     try:
         from app.config import get_settings  # import tại chỗ để test không cần .env
@@ -58,7 +58,17 @@ def today_local(now: Optional[datetime] = None) -> date:
         tz_name = getattr(get_settings(), "timezone", DEFAULT_TZ) or DEFAULT_TZ
     except Exception:
         pass
-    tz = ZoneInfo(tz_name)
+    return ZoneInfo(tz_name)
+
+
+def now_local() -> datetime:
+    """Giờ hiện tại theo giờ Việt Nam (có múi giờ), dùng cho bộ lập lịch báo cáo."""
+    return datetime.now(_tz())
+
+
+def today_local(now: Optional[datetime] = None) -> date:
+    """Ngày hôm nay theo giờ Việt Nam."""
+    tz = _tz()
     return (now.astimezone(tz) if now else datetime.now(tz)).date()
 
 

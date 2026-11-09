@@ -4,6 +4,8 @@
 # Xoá phiên = adelete_thread (checkpoints, blobs, writes) rồi xoá dòng sổ cái.
 # Các tham số (số phiên tối đa, số ngày hết hạn...) nằm trong app/config.py (biến môi trường).
 # Phiên bị xoá khi session_idle_days ngày không dùng hoặc quá session_max_days ngày kể từ lúc tạo.
+# Thread báo cáo sáng (kind = 'report', xem app/reports/) nằm chung bảng chat_sessions nhưng KHÔNG tính vào
+# hạn mức phiên, không hiện trong /sessions, và hết hạn sau REPORT_RETENTION_DAYS ngày.
 # Khoá theo thread giữ trong RAM nên service chỉ được chạy MỘT worker.
 # `pool` ở mọi hàm là pool tới database agent_app (row_factory=dict_row, xem app/main.py).
 
@@ -16,6 +18,8 @@ from datetime import datetime, timedelta
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+REPORT_RETENTION_DAYS = 3  # thread báo cáo giữ 3 ngày kể từ lúc tạo
 
 _locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
 
@@ -60,7 +64,7 @@ async def create_session(graph, pool, user_id) -> tuple[str, list[str]]:
             await conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s::text))", (uid,))
             cur = await conn.execute(
                 "SELECT thread_id FROM agent_state.chat_sessions "
-                "WHERE user_id = %s ORDER BY last_active DESC OFFSET %s",
+                "WHERE user_id = %s AND kind = 'chat' ORDER BY last_active DESC OFFSET %s",
                 (uid, get_settings().max_sessions_per_user - 1),  # chừa chỗ cho phiên mới
             )
             surplus = [r["thread_id"] for r in await cur.fetchall()]
@@ -99,11 +103,38 @@ async def reuse_empty_active(pool, user_id) -> str | None:
         cur = await conn.execute(
             "SELECT s.thread_id FROM agent_state.users u "
             "JOIN agent_state.chat_sessions s ON s.thread_id = u.active_thread "
-            "WHERE u.telegram_id = %s AND s.title IS NULL",
+            "WHERE u.telegram_id = %s AND s.title IS NULL AND s.kind = 'chat'",
             (int(user_id),),
         )
         row = await cur.fetchone()
     return row["thread_id"] if row else None
+
+
+def report_thread_id(user_id, day) -> str:
+    """Tên thread báo cáo của một người trong một ngày, ví dụ tg:123456789:report:20261106."""
+    return f"tg:{user_id}:report:{day:%Y%m%d}"
+
+
+async def register_report_thread(pool, user_id, thread: str, title: str) -> None:
+    """Ghi thread báo cáo vào sổ cái với kind='report' (không đổi phiên đang dùng của người dùng)."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO agent_state.chat_sessions (thread_id, user_id, title, kind) "
+            "SELECT %s, %s, %s, 'report' "
+            "WHERE NOT EXISTS (SELECT 1 FROM agent_state.chat_sessions WHERE thread_id = %s)",
+            (thread, str(user_id), title, thread),
+        )
+
+
+async def latest_report_thread(pool, user_id) -> dict | None:
+    """Thread báo cáo mới nhất còn hạn của người dùng (dùng cho lệnh /reply), hoặc None."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT thread_id, title, created_at FROM agent_state.chat_sessions "
+            "WHERE user_id = %s AND kind = 'report' ORDER BY created_at DESC LIMIT 1",
+            (str(user_id),),
+        )
+        return await cur.fetchone()
 
 
 async def get_or_create_active(graph, pool, user_id) -> tuple[str, bool]:
@@ -143,7 +174,7 @@ async def list_sessions(pool, user_id) -> list[dict]:
             "       (s.thread_id = u.active_thread) AS is_active "
             "FROM agent_state.chat_sessions s "
             "LEFT JOIN agent_state.users u ON u.telegram_id = %s "
-            "WHERE s.user_id = %s ORDER BY s.created_at",
+            "WHERE s.user_id = %s AND s.kind = 'chat' ORDER BY s.created_at",
             (int(user_id), str(user_id)),
         )
         return await cur.fetchall()
@@ -216,9 +247,10 @@ async def purge_expired(graph, pool) -> int:
     async with pool.connection() as conn:
         cur = await conn.execute(
             "SELECT thread_id FROM agent_state.chat_sessions "
-            "WHERE last_active < now() - make_interval(days => %s) "
-            "   OR created_at  < now() - make_interval(days => %s)",
-            (s.session_idle_days, s.session_max_days),
+            "WHERE (kind = 'chat' AND (last_active < now() - make_interval(days => %s) "
+            "                          OR created_at  < now() - make_interval(days => %s))) "
+            "   OR (kind = 'report' AND created_at < now() - make_interval(days => %s))",
+            (s.session_idle_days, s.session_max_days, REPORT_RETENTION_DAYS),
         )
         expired = [r["thread_id"] for r in await cur.fetchall()]
         cur = await conn.execute(

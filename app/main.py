@@ -3,7 +3,7 @@
 # kinh doanh) và pool ghi cho database agent_app (người dùng, phiên, hội thoại, audit), tạo bảng
 # người dùng/phiên/audit và nạp owner đầu tiên nếu bảng còn trống, dựng checkpointer
 # PostgresSaver, compile graph một lần và chạy các tác vụ nền (bot Telegram, dọn dashboard hết
-# hạn, dọn phiên/audit cũ). FastAPI chỉ còn phục vụ health check cho Docker HEALTHCHECK.
+# hạn, dọn phiên/audit cũ, gửi báo cáo sáng cho manager). FastAPI chỉ còn phục vụ health check cho Docker HEALTHCHECK.
 # Khi tắt thì dừng các tác vụ nền và đóng pool.
 
 import asyncio
@@ -12,6 +12,7 @@ import os
 import signal
 from contextlib import AsyncExitStack, asynccontextmanager
 
+from aiogram import Bot
 from fastapi import FastAPI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
@@ -24,7 +25,10 @@ from app.agent.tools.dashboard_tools import cleanup_loop as dashboard_cleanup_lo
 from app.api.v1.router import api_router
 from app.audit import init_audit
 from app.config import get_settings
-from app.db.pool import close_pool, init_pool
+from app.db.pool import close_pool, get_pool, init_pool
+from app.reports.scheduler import report_loop
+from app.reports.subscriptions import ensure_schema as ensure_report_schema
+from app.reports.subscriptions import get_store
 from app.telegram.auth import init_users
 from app.telegram.bot import run_bot
 
@@ -34,6 +38,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _bot_token() -> str:
+    """Token bot Telegram, dùng cho Bot gửi báo cáo sáng. Sửa tên biến nếu settings của bạn đặt khác."""
+    token = getattr(settings, "telegram_bot_token", None)
+    if token is None:
+        raise RuntimeError("Không tìm thấy token bot trong settings: sửa _bot_token() trong app/main.py")
+    return token.get_secret_value() if hasattr(token, "get_secret_value") else token
 
 
 def _on_bot_done(task: asyncio.Task) -> None:
@@ -76,10 +88,17 @@ async def lifespan(app: FastAPI):
             await checkpointer.setup()  # tạo bảng checkpoint nếu chưa có
             await init_users(cp_pool)  # tạo bảng users + chat_sessions; nạp users_seed.yaml nếu trống
             await init_audit(cp_pool)  # tạo/bổ sung cột bảng audit_log
+            # Bảng report_state + cột chat_sessions.kind (phải chạy SAU init_users vì cần bảng chat_sessions)
+            await ensure_report_schema(cp_pool)
             logger.info("Hội thoại và người dùng được lưu trong PostgreSQL (agent_app)")
 
             app.state.graph = build_graph(ALL_TOOLS, checkpointer)
             app.state.cp_pool = cp_pool
+
+            # Bot riêng chỉ để GỬI báo cáo sáng (bot nhận tin trong run_bot dùng Bot khác, cùng token
+            # nên không xung đột). Báo cáo chạy các câu SQL viết sẵn qua pool chỉ-đọc, không qua LLM.
+            report_bot = Bot(token=_bot_token())
+            stack.push_async_callback(report_bot.session.close)
 
             bot_task = asyncio.create_task(
                 run_bot(app.state.graph, cp_pool), name="telegram-bot"
@@ -90,6 +109,11 @@ async def lifespan(app: FastAPI):
                 asyncio.create_task(dashboard_cleanup_loop()),
                 # Dọn phiên hết hạn + checkpoint mồ côi + audit quá 30 ngày, chạy mỗi giờ
                 asyncio.create_task(purge_loop(cp_pool, app.state.graph)),
+                # Gửi báo cáo sáng cho manager theo config/reports.yaml (kiểm tra mỗi 60 giây)
+                asyncio.create_task(
+                    report_loop(report_bot, app.state.graph, cp_pool, lambda role: get_pool(), get_store()),
+                    name="report-loop",
+                ),
             ]
             try:
                 yield

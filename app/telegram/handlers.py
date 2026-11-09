@@ -1,6 +1,7 @@
 # app/telegram/handlers.py
 # Các handler của bot Telegram:
 #   /start /help /new /sessions /tuan /thang /dashboard /myid, tin nhắn thường, phản hồi tin lạ,
+#   báo cáo sáng của manager (/reply /baocao /baocao_tat /baocao_bat /baocao_gio),
 #   nút bấm trong /sessions (chuyển/xoá phiên), và lệnh quản trị người dùng
 #   (/adduser /addadmin /removeadmin /removeuser /users).
 # Mọi tin nhắn và nút bấm đi qua middleware trước: chỉ chat riêng, chỉ người có trong bảng
@@ -9,8 +10,10 @@
 # Lệnh quản trị và quản lý phiên là code cố định, không đi qua LLM.
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
+from datetime import time as dtime
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
@@ -23,9 +26,11 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from app.agent.permissions import ROLE_TABLES
 from app.agent.runner import MSG_BUSY, run_turn
 from app.agent.sessions import (
+    REPORT_RETENTION_DAYS,
     create_session,
     delete_own_session,
     is_busy,
+    latest_report_thread,
     list_sessions,
     peek_active,
     purge_user_sessions,
@@ -35,6 +40,15 @@ from app.agent.sessions import (
 )
 from app.audit import log_turn
 from app.config import get_settings
+from app.reports.builder import SECTIONS
+from app.reports.subscriptions import (
+    REPORT_ROLE,
+    effective_send_time,
+    get_store,
+    load_states,
+    set_paused,
+    set_send_time,
+)
 from app.telegram.auth import (
     ADMIN,
     OWNER,
@@ -97,6 +111,29 @@ PROMPT_MONTH = (
 PROMPT_DASHBOARD = "Tạo dashboard doanh thu tuần này."
 
 _TAG = {OWNER: " (chủ)", ADMIN: " (admin)", STAFF: ""}
+
+MSG_NOT_MANAGER = "Lệnh này dành cho tài khoản nhận báo cáo tự động hằng ngày."
+MSG_NOT_REGISTERED = "Bạn chưa được đăng ký nhận báo cáo tự động. Liên hệ admin để được thêm."
+
+
+def _is_report_user(user: AllowedUser) -> bool:
+    return (user.role or "").lower() == REPORT_ROLE
+
+
+def _manager_help(user: AllowedUser) -> str:
+    """Phần hướng dẫn báo cáo sáng, chỉ hiện cho manager."""
+    if not _is_report_user(user):
+        return ""
+    cfg = get_store().get()
+    lines = [
+        "\n\nBáo cáo tự động hằng ngày:",
+        "/baocao - xem cấu hình báo cáo sáng của bạn",
+        "/baocao_tat, /baocao_bat - tắt hoặc bật báo cáo sáng",
+        "/reply [câu hỏi] - hỏi tiếp về báo cáo vừa nhận",
+    ]
+    if cfg is not None and cfg.manager_can_change_time:
+        lines.insert(4, "/baocao_gio 07:30 - đổi giờ nhận báo cáo")
+    return "\n".join(lines)
 
 
 def _is_myid(event: Message) -> bool:
@@ -199,7 +236,11 @@ async def _ask(message: Message, user: AllowedUser, graph, pool, text: str) -> N
         await message.answer(
             "Cuộc trò chuyện trước đã kết thúc (hết hạn hoặc bị lỗi) nên mình bắt đầu cuộc mới."
         )
-    await send_text(message, result.answer)
+    answer = result.answer
+    tag = _report_tag(result.thread) if result.ok else None
+    if tag:  # đang hỏi tiếp trong thread báo cáo: nhắc để không nhầm với phiên chat thường
+        answer = f"{tag}\n\n{answer}"
+    await send_text(message, answer)
 
 
 async def cmd_myid(message: Message) -> None:
@@ -208,13 +249,14 @@ async def cmd_myid(message: Message) -> None:
 
 async def cmd_start(message: Message, user: AllowedUser) -> None:
     text = f"Xin chào {user.name or ''}!\n\n{HELP_TEXT}".replace("Xin chào !", "Xin chào!")
+    text += _manager_help(user)
     if user.is_admin:
         text += ADMIN_HELP_TEXT
     await message.answer(text)
 
 
 async def cmd_help(message: Message, user: AllowedUser) -> None:
-    text = HELP_TEXT + (ADMIN_HELP_TEXT if user.is_admin else "")
+    text = HELP_TEXT + _manager_help(user) + (ADMIN_HELP_TEXT if user.is_admin else "")
     await message.answer(text)
 
 
@@ -253,6 +295,152 @@ async def cmd_month(message: Message, user: AllowedUser, graph, pool) -> None:
 
 async def cmd_dashboard(message: Message, user: AllowedUser, graph, pool) -> None:
     await _ask(message, user, graph, pool, PROMPT_DASHBOARD)
+
+
+# ---------------------------------------------------------------- báo cáo sáng (chỉ manager)
+# Nội dung báo cáo do admin cấu hình trong config/reports.yaml. Thread báo cáo (kind='report') không
+# tính vào hạn mức phiên; /reply chỉ chuyển phiên đang dùng sang thread đó.
+
+_REPORT_THREAD_RE = re.compile(r":report:(\d{4})(\d{2})(\d{2})$")
+_HHMM_RE = re.compile(r"^(\d{1,2})(?:[:h](\d{2})?)?$")
+
+
+def _report_tag(thread: str | None) -> str | None:
+    m = _REPORT_THREAD_RE.search(thread or "")
+    return f"📊 Đang hỏi tiếp báo cáo ngày {m[3]}/{m[2]}" if m else None
+
+
+def _parse_hhmm(text: str) -> dtime | None:
+    """'07:30', '7:30', '7h30', '7h' -> time; không hiểu thì None."""
+    m = _HHMM_RE.match(text.strip().lower())
+    if not m:
+        return None
+    hour, minute = int(m[1]), int(m[2] or 0)
+    return dtime(hour, minute) if hour < 24 and minute < 60 else None
+
+
+def _report_entry(user: AllowedUser):
+    """(cấu hình, mục của người này trong reports.yaml); phần nào không có thì None."""
+    cfg = get_store().get()
+    return cfg, (cfg.managers.get(user.telegram_id) if cfg is not None else None)
+
+
+async def cmd_reply(message: Message, command: CommandObject, user: AllowedUser, graph, pool) -> None:
+    """/reply: chuyển sang thread báo cáo gần nhất. /reply <câu hỏi>: chuyển rồi hỏi luôn."""
+    if not _is_report_user(user):
+        await message.answer(MSG_NOT_MANAGER)
+        return
+    uid = str(user.telegram_id)
+    report = await latest_report_thread(pool, uid)
+    if report is None or not await switch_session(pool, uid, report["thread_id"]):
+        await message.answer(
+            f"Chưa có báo cáo nào còn hiệu lực (báo cáo được giữ {REPORT_RETENTION_DAYS} ngày). "
+            "Bạn cứ hỏi tự nhiên, mình trả lời trong cuộc trò chuyện hiện tại."
+        )
+        return
+    question = (command.args or "").strip()
+    if not question:
+        await message.answer(
+            f"Đã chuyển sang {report['title']}. Bạn cứ hỏi tiếp về báo cáo này, "
+            "ví dụ: gửi dashboard doanh thu theo kênh.\n"
+            "Gõ /new để quay lại cuộc trò chuyện thường."
+        )
+        return
+    await _ask(message, user, graph, pool, question)
+
+
+async def cmd_baocao(message: Message, user: AllowedUser, pool) -> None:
+    """Xem trạng thái báo cáo sáng của chính mình."""
+    if not _is_report_user(user):
+        await message.answer(MSG_NOT_MANAGER)
+        return
+    cfg, manager = _report_entry(user)
+    if cfg is None:
+        await message.answer("Báo cáo tự động chưa được cấu hình.")
+        return
+    if manager is None:
+        await message.answer(MSG_NOT_REGISTERED)
+        return
+    state = (await load_states(pool)).get(user.telegram_id)
+    if not manager.enabled:
+        status = "admin đang tắt"
+    elif state is not None and state.paused:
+        status = "bạn đang tạm dừng (gõ /baocao_bat để bật lại)"
+    else:
+        status = "đang bật"
+    send_time = effective_send_time(cfg, manager, state)
+    titles = ", ".join(SECTIONS[s].title if s in SECTIONS else s for s in manager.sections)
+    last = state.last_sent_on.strftime("%d/%m/%Y") if state and state.last_sent_on else "chưa gửi lần nào"
+    lines = [
+        "📬 Báo cáo tự động hằng ngày",
+        f"• Trạng thái: {status}",
+        f"• Giờ gửi: {send_time:%H:%M} (giờ Việt Nam)"
+        + ("" if cfg.manager_can_change_time else ", do admin đặt"),
+        f"• Nội dung: {titles}",
+        f"• Lần gửi gần nhất: {last}",
+        "",
+        "Số liệu là của ngày hôm qua, so với hôm trước và cùng ngày tuần trước.",
+        "Lệnh: /baocao_tat, /baocao_bat, /reply"
+        + (", /baocao_gio 07:30" if cfg.manager_can_change_time else ""),
+    ]
+    await message.answer("\n".join(lines))
+
+
+async def _set_pause(message: Message, user: AllowedUser, pool, paused: bool) -> None:
+    if not _is_report_user(user):
+        await message.answer(MSG_NOT_MANAGER)
+        return
+    _, manager = _report_entry(user)
+    if manager is None:
+        await message.answer(MSG_NOT_REGISTERED)
+        return
+    if not paused and not manager.enabled:
+        await message.answer("Admin đang tắt báo cáo của bạn nên chưa bật lại được. Liên hệ admin nhé.")
+        return
+    await set_paused(pool, user.telegram_id, paused)
+    await message.answer(
+        "Đã tạm dừng báo cáo sáng. Gõ /baocao_bat khi muốn nhận lại."
+        if paused
+        else "Đã bật lại báo cáo sáng."
+    )
+
+
+async def cmd_baocao_tat(message: Message, user: AllowedUser, pool) -> None:
+    await _set_pause(message, user, pool, True)
+
+
+async def cmd_baocao_bat(message: Message, user: AllowedUser, pool) -> None:
+    await _set_pause(message, user, pool, False)
+
+
+async def cmd_baocao_gio(message: Message, command: CommandObject, user: AllowedUser, pool) -> None:
+    """Manager tự đổi giờ nhận báo cáo; chỉ hoạt động khi admin bật manager_can_change_time."""
+    if not _is_report_user(user):
+        await message.answer(MSG_NOT_MANAGER)
+        return
+    cfg, manager = _report_entry(user)
+    if cfg is None or manager is None:
+        await message.answer(MSG_NOT_REGISTERED)
+        return
+    if not cfg.manager_can_change_time:
+        await message.answer(
+            f"Giờ nhận báo cáo do admin đặt (hiện là {manager.send_time:%H:%M}). "
+            "Liên hệ admin nếu muốn đổi."
+        )
+        return
+    value = _parse_hhmm(command.args or "")
+    if value is None:
+        await message.answer(
+            f"Cách dùng: /baocao_gio 07:30 (chọn giờ từ {cfg.manager_time_min:%H:%M} "
+            f"đến {cfg.manager_time_max:%H:%M})."
+        )
+        return
+    try:
+        await set_send_time(pool, cfg, user.telegram_id, value)
+    except ValueError as e:
+        await message.answer(str(e))
+        return
+    await message.answer(f"Đã đổi giờ nhận báo cáo thành {value:%H:%M}, áp dụng từ lần gửi tiếp theo.")
 
 
 # ---------------------------------------------------------------- quản lý phiên (/sessions)
@@ -461,6 +649,12 @@ def build_router() -> Router:
     router.message.register(cmd_week, Command("tuan"))
     router.message.register(cmd_month, Command("thang"))
     router.message.register(cmd_dashboard, Command("dashboard"))
+    # Báo cáo sáng (chỉ manager; người khác gõ thì được nhắc là lệnh không dành cho họ)
+    router.message.register(cmd_reply, Command("reply"))
+    router.message.register(cmd_baocao, Command("baocao"))
+    router.message.register(cmd_baocao_tat, Command("baocao_tat"))
+    router.message.register(cmd_baocao_bat, Command("baocao_bat"))
+    router.message.register(cmd_baocao_gio, Command("baocao_gio"))
     # Lệnh quản trị (người thường gõ thì không có phản hồi)
     router.message.register(cmd_adduser, Command("adduser"))
     router.message.register(cmd_addadmin, Command("addadmin"))

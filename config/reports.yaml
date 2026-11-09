@@ -1,0 +1,43 @@
+# config/reports.yaml
+# Báo cáo tự động gửi cho MANAGER mỗi sáng (chỉ role manager nhận, boss/staff không nhận).
+# Admin sửa file này; service tự nạp lại trong vòng 1 phút, KHÔNG cần restart
+# (cần mount thư mục config vào container, xem docker-compose.yml).
+# Nếu file sai cú pháp thì service giữ cấu hình cũ và ghi lỗi vào log.
+#
+# LƯU Ý: giờ nên đặt trong ngoặc kép, ví dụ "07:00".
+
+# Giờ gửi mặc định (giờ Việt Nam) cho manager không khai báo send_time riêng.
+default_send_time: "07:00"
+
+# Nếu service bật lại muộn hơn giờ hẹn quá số phút này thì bỏ qua báo cáo hôm đó
+# (tránh nhận báo cáo "7h sáng" lúc chiều tối). Trong khoảng này thì gửi bù.
+max_delay_minutes: 180
+
+# Cho phép manager tự đổi giờ nhận (bằng lệnh, chưa có trong code hiện tại).
+# false = chỉ admin đổi trong file này.
+manager_can_change_time: false
+# Khoảng giờ manager được chọn nếu bật tuỳ chọn trên (dữ liệu hôm qua phải chốt xong trước giờ này).
+manager_time_range: ["06:00", "10:00"]
+
+# Dòng nhắc cuối mỗi báo cáo. Chỉ bật sau khi đã có lệnh /reply, để trống nếu chưa có.
+footer: ""
+# footer: "Gõ /reply để hỏi tiếp về báo cáo này, ví dụ: /reply gửi dashboard doanh thu theo kênh"
+
+# Các mục báo cáo dùng được (tên file trong app/agent/queries/):
+#   kpi_summary, revenue_by_day, revenue_by_channel, top_products,
+#   customers_new_vs_returning, target_vs_actual
+default_sections: [kpi_summary, revenue_by_channel, top_products]
+
+# Danh sách manager nhận báo cáo: khoá là Telegram ID (lấy bằng /myid).
+# Người trong danh sách này phải còn tồn tại và có role manager trong /users.
+managers:
+  123456789:
+    name: "Nguyễn Văn A"
+    send_time: "07:00"
+    sections: [kpi_summary, revenue_by_channel]
+    enabled: true
+  987654321:
+    name: "Trần Thị B"
+    send_time: "07:30"
+    sections: [kpi_summary, top_products, customers_new_vs_returning]
+    enabled: true
