@@ -2,7 +2,7 @@
 # Cấu hình và trạng thái của báo cáo tự động gửi cho manager.
 #   - Cấu hình (ai nhận, mục nào, giờ nào): file config/reports.yaml do admin sửa, tự nạp lại
 #     khi file đổi (ConfigStore). File sai thì giữ cấu hình cũ, không làm sập service.
-#   - Trạng thái (hôm nay đã gửi chưa, manager có đổi giờ/tạm dừng không): bảng
+#   - Trạng thái (hôm nay đã gửi chưa, đã bỏ lỡ chưa, manager có đổi giờ/tạm dừng không): bảng
 #     agent_state.report_state trong database agent_app. Ghi ngày đã gửi vào DB nên restart
 #     giữa chừng vẫn gửi bù được mà không bao giờ gửi trùng trong ngày.
 # `pool` ở các hàm DB là pool tới database agent_app (row_factory=dict_row, như sessions.py).
@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Iterable, Optional
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -50,6 +51,9 @@ class ReportConfig:
     manager_time_max: time
     footer: str
     managers: dict[int, ManagerReport]
+    timezone: str = "Asia/Ho_Chi_Minh"
+    retry_on_error: int = 2
+    commentary_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,6 +61,12 @@ class ReportState:
     last_sent_on: Optional[date] = None
     send_time: Optional[time] = None  # giờ manager tự chọn (chỉ có tác dụng nếu cho phép)
     paused: bool = False
+    last_skipped_on: Optional[date] = None  # ngày đã ghi nhận "bỏ lỡ vì quá muộn" (chỉ ghi 1 lần/ngày)
+
+
+def now_in_tz(cfg: ReportConfig) -> datetime:
+    """Giờ hiện tại theo múi giờ trong reports.yaml (có tzinfo). scheduler.py dùng hàm này."""
+    return datetime.now(ZoneInfo(cfg.timezone))
 
 
 # ---------------------------------------------------------------- đọc reports.yaml
@@ -155,6 +165,18 @@ def load_config(path: Path = CONFIG_PATH, known_sections: Optional[Iterable[str]
             enabled=bool(item.get("enabled", True)),
         )
 
+    tz_name = str(raw.get("timezone") or "Asia/Ho_Chi_Minh")
+    try:
+        ZoneInfo(tz_name)
+    except Exception:
+        raise ConfigError(f'timezone "{tz_name}" không hợp lệ, ví dụ "Asia/Ho_Chi_Minh"') from None
+    try:
+        retry = int(raw.get("retry_on_error", 2))
+    except (TypeError, ValueError):
+        raise ConfigError("retry_on_error phải là số lần thử lại") from None
+    if not 0 <= retry <= 5:
+        raise ConfigError("retry_on_error phải từ 0 đến 5")
+
     return ReportConfig(
         default_send_time=default_time,
         max_delay_minutes=max_delay,
@@ -163,6 +185,9 @@ def load_config(path: Path = CONFIG_PATH, known_sections: Optional[Iterable[str]
         manager_time_max=t_max,
         footer=str(raw.get("footer") or "").strip(),
         managers=managers,
+        timezone=tz_name,
+        retry_on_error=retry,
+        commentary_enabled=bool(raw.get("commentary_enabled", False)),
     )
 
 
@@ -233,12 +258,35 @@ def due_reports(cfg: ReportConfig, states: dict[int, ReportState], now: datetime
         state = states.get(manager.user_id)
         if not manager.enabled or (state is not None and state.paused):
             continue
-        if state is not None and state.last_sent_on == today:
-            continue
+        if state is not None and (state.last_sent_on == today or state.last_skipped_on == today):
+            continue  # đã gửi, hoặc đã bỏ cuộc/bỏ lỡ hôm nay (restart cũng không thử lại)
         send_time = effective_send_time(cfg, manager, state)
         scheduled = datetime.combine(today, send_time, tzinfo=now.tzinfo)
         if scheduled <= now <= scheduled + timedelta(minutes=cfg.max_delay_minutes):
             out.append(DueReport(manager, send_time))
+    return out
+
+
+def late_reports(cfg: ReportConfig, states: dict[int, ReportState], now: datetime) -> list[ManagerReport]:
+    """Manager đã quá giờ hẹn + max_delay_minutes mà hôm nay chưa gửi và chưa ghi nhận bỏ lỡ.
+
+    scheduler.py gọi mark_skipped() + ghi audit (status = skipped_late) cho từng người trả về,
+    nhờ cột last_skipped_on nên mỗi người chỉ bị ghi đúng 1 lần/ngày dù vòng nền chạy mỗi phút.
+    """
+    today = now.date()
+    out = []
+    for manager in cfg.managers.values():
+        state = states.get(manager.user_id)
+        if not manager.enabled or (state is not None and state.paused):
+            continue
+        if state is not None and (state.last_sent_on == today or state.last_skipped_on == today):
+            continue
+        send_time = effective_send_time(cfg, manager, state)
+        deadline = datetime.combine(today, send_time, tzinfo=now.tzinfo) + timedelta(
+            minutes=cfg.max_delay_minutes
+        )
+        if now > deadline:
+            out.append(manager)
     return out
 
 
@@ -251,6 +299,7 @@ _SCHEMA_SQL = [
     " send_time TIME,"
     " paused BOOLEAN NOT NULL DEFAULT FALSE,"
     " updated_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+    "ALTER TABLE agent_state.report_state ADD COLUMN IF NOT EXISTS last_skipped_on DATE",
     # Phân biệt phiên chat thường (tính vào hạn mức) với thread báo cáo (không tính)
     "ALTER TABLE agent_state.chat_sessions ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'chat'",
 ]
@@ -266,11 +315,14 @@ async def ensure_schema(pool) -> None:
 async def load_states(pool) -> dict[int, ReportState]:
     async with pool.connection() as conn:
         cur = await conn.execute(
-            "SELECT user_id, last_sent_on, send_time, paused FROM agent_state.report_state"
+            "SELECT user_id, last_sent_on, send_time, paused, last_skipped_on "
+            "FROM agent_state.report_state"
         )
         rows = await cur.fetchall()
     return {
-        int(r["user_id"]): ReportState(r["last_sent_on"], r["send_time"], bool(r["paused"]))
+        int(r["user_id"]): ReportState(
+            r["last_sent_on"], r["send_time"], bool(r["paused"]), r["last_skipped_on"]
+        )
         for r in rows
     }
 
@@ -280,6 +332,16 @@ async def mark_sent(pool, user_id: int, day: date) -> None:
         await conn.execute(
             "INSERT INTO agent_state.report_state (user_id, last_sent_on) VALUES (%s, %s) "
             "ON CONFLICT (user_id) DO UPDATE SET last_sent_on = EXCLUDED.last_sent_on, updated_at = now()",
+            (user_id, day),
+        )
+
+
+async def mark_skipped(pool, user_id: int, day: date) -> None:
+    """Ghi nhận hôm nay bỏ lỡ báo cáo vì quá max_delay_minutes (để audit chỉ ghi 1 lần/ngày)."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO agent_state.report_state (user_id, last_skipped_on) VALUES (%s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET last_skipped_on = EXCLUDED.last_skipped_on, updated_at = now()",
             (user_id, day),
         )
 

@@ -15,19 +15,19 @@
 
 users:
   # Người xây pipeline: toàn quyền
-  - telegram_id: 9266387226       # <-- thay bằng Telegram ID của bạn
+  - telegram_id: 92663872260       # <-- thay bằng Telegram ID của bạn
     name: "thanh"
     role: boss
     level: owner
 
   # CEO, giám đốc, quản lý cấp cao: xem toàn bộ dữ liệu, cấp/thu hồi quyền cho nhân viên,
   # nhưng không có quyền quản trị bot (level: staff)
-  - telegram_id: 222222222        # <-- thay bằng Telegram ID của CEO
-    name: "CEO"
-    role: manager
-    level: admin
+#  - telegram_id: 222222222        # <-- thay bằng Telegram ID của CEO
+#    name: "CEO"
+#    role: manager
+#   level: admin
 
-  - telegram_id: 333333333        # <-- thay bằng Telegram ID của giám đốc
-    name: "Giám đốc"
-    role: manager
-    level: admin
+#  - telegram_id: 333333333        # <-- thay bằng Telegram ID của giám đốc
+#    name: "Giám đốc"
+#    role: manager
+#    level: admin

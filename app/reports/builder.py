@@ -8,6 +8,7 @@
 #   %(end_exclusive)s (ngày sau ngày cuối, dùng cho  col >= %(start)s AND col < %(end_exclusive)s).
 # Bảng mà mỗi mục dùng được đọc tự động từ chính câu SQL để kiểm tra quyền (permissions.py).
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from app.agent.periods import Period, comparison_periods, resolve_period, today_local
 from app.agent.permissions import can_access
@@ -216,6 +217,41 @@ async def _run_section(pool, sql: str, section: Section, period: Period) -> list
     return _render_single(cur, comparisons)
 
 
+# ---------------------------------------------------------------- nhận xét (tuỳ chọn, v2)
+
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*%?")
+
+
+def _numbers_ok(comment: str, report_text: str) -> bool:
+    """Chống bịa số: mọi số trong nhận xét phải xuất hiện trong báo cáo. Số nguyên nhỏ (<= 10, không
+    kèm %) được bỏ qua để câu như "top 3 sản phẩm" không bị loại oan. Đây là kiểm tra thô."""
+    for tok in _NUMBER_RE.findall(comment):
+        if tok.isdigit() and int(tok) <= 10:
+            continue
+        if tok not in report_text:
+            return False
+    return True
+
+
+async def _commentary_block(
+    fn: Callable[[str], Awaitable[str]], report_text: str, timeout: float
+) -> Optional[str]:
+    """Gọi hàm viết nhận xét. Lỗi, quá thời gian, rỗng hoặc có số không có trong báo cáo thì trả None
+    (báo cáo vẫn được gửi, chỉ không có nhận xét)."""
+    try:
+        raw = await asyncio.wait_for(fn(report_text), timeout)
+    except Exception:  # gồm cả hết thời gian chờ
+        logger.warning("Không tạo được nhận xét, gửi báo cáo không có nhận xét", exc_info=True)
+        return None
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if not _numbers_ok(raw, report_text):
+        logger.warning("Nhận xét chứa số không có trong báo cáo, bỏ qua nhận xét")
+        return None
+    return "💬 Nhận xét\n" + raw
+
+
 # ---------------------------------------------------------------- báo cáo hoàn chỉnh
 
 @dataclass(frozen=True)
@@ -225,12 +261,20 @@ class BuiltReport:
     ok: tuple
     failed: tuple
     denied: tuple
+    commentary: bool = False  # True nếu báo cáo có kèm nhận xét
 
 
 async def build_report(
-    pool, role: str, sections, today: Optional[date] = None
+    pool,
+    role: str,
+    sections,
+    today: Optional[date] = None,
+    commentary: Optional[Callable[[str], Awaitable[str]]] = None,
+    commentary_timeout: float = 20.0,
 ) -> BuiltReport:
     """Dựng báo cáo ngày hôm qua cho `role`, gồm các mục trong `sections`.
+
+    - commentary: hàm async nhận chữ báo cáo, trả 2-3 dòng nhận xét (reports/commentary.py). None = không nhận xét.
 
     - Mục vượt quyền của role: bỏ qua (phòng trường hợp bị hạ quyền sau khi admin đã cấu hình).
     - Mục lỗi: ghi một dòng cảnh báo trong báo cáo, các mục khác vẫn gửi.
@@ -273,7 +317,10 @@ async def build_report(
 
     header = [f"📊 Báo cáo kinh doanh {period.label}"]
     text = "\n".join(header) + "\n\n" + "\n\n".join("\n".join(b) for b in blocks)
-    return BuiltReport(text, period, tuple(ok), tuple(failed), tuple(denied))
+    note = await _commentary_block(commentary, text, commentary_timeout) if commentary else None
+    if note:
+        text += "\n\n" + note
+    return BuiltReport(text, period, tuple(ok), tuple(failed), tuple(denied), commentary=bool(note))
 
 
 # ---------------------------------------------------------------- cắt tin dài

@@ -6,15 +6,21 @@
 #
 # LƯU Ý: giờ nên đặt trong ngoặc kép, ví dụ "07:00".
 
+# Múi giờ để tính "giờ hẹn" và "ngày đã gửi" (cột sent_date trong report_send_log).
+# [MỚI v2]
+timezone: "Asia/Ho_Chi_Minh"
+
 # Giờ gửi mặc định (giờ Việt Nam) cho manager không khai báo send_time riêng.
 default_send_time: "07:00"
 
 # Nếu service bật lại muộn hơn giờ hẹn quá số phút này thì bỏ qua báo cáo hôm đó
 # (tránh nhận báo cáo "7h sáng" lúc chiều tối). Trong khoảng này thì gửi bù.
+# Báo cáo bị bỏ qua được ghi vào report_send_log với status = skipped_late.
 max_delay_minutes: 180
+retry_on_error: 2
 
-# Cho phép manager tự đổi giờ nhận (bằng lệnh, chưa có trong code hiện tại).
-# false = chỉ admin đổi trong file này.
+commentary_enabled: false
+
 manager_can_change_time: false
 # Khoảng giờ manager được chọn nếu bật tuỳ chọn trên (dữ liệu hôm qua phải chốt xong trước giờ này).
 manager_time_range: ["06:00", "10:00"]
@@ -30,14 +36,15 @@ default_sections: [kpi_summary, revenue_by_channel, top_products]
 
 # Danh sách manager nhận báo cáo: khoá là Telegram ID (lấy bằng /myid).
 # Người trong danh sách này phải còn tồn tại và có role manager trong /users.
-managers:
-  123456789:
-    name: "Nguyễn Văn A"
-    send_time: "07:00"
-    sections: [kpi_summary, revenue_by_channel]
-    enabled: true
-  987654321:
-    name: "Trần Thị B"
-    send_time: "07:30"
-    sections: [kpi_summary, top_products, customers_new_vs_returning]
-    enabled: true
+# Mục nào manager không đủ quyền xem (allowlist.yaml + data_grants) sẽ bị bỏ khỏi báo cáo và ghi audit.
+# managers:
+#   123456789:
+#     name: "Nguyễn Văn A"
+#     send_time: "07:00"
+#     sections: [kpi_summary, revenue_by_channel]
+#     enabled: true
+#   987654321:
+#     name: "Trần Thị B"
+#     send_time: "07:30"
+#     sections: [kpi_summary, top_products, customers_new_vs_returning]
+#     enabled: true
