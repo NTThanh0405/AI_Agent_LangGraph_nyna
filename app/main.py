@@ -1,7 +1,7 @@
 # app/main.py
 # Điểm khởi động của dịch vụ. Khi khởi động: cấu hình log, mở pool PostgreSQL chỉ-đọc (dữ liệu
 # kinh doanh) và pool ghi cho database agent_app (người dùng, phiên, hội thoại, audit), tạo bảng
-# người dùng/phiên/audit và nạp owner đầu tiên nếu bảng còn trống, dựng checkpointer
+# người dùng/phiên/audit, nạp cấu hình agent (config/agents.yaml) và owner đầu tiên nếu bảng còn trống, dựng checkpointer
 # PostgresSaver, compile graph một lần và chạy các tác vụ nền (bot Telegram, dọn dashboard hết
 # hạn, dọn phiên/audit cũ, gửi báo cáo sáng cho manager). FastAPI chỉ còn phục vụ health check cho Docker HEALTHCHECK.
 # Khi tắt thì dừng các tác vụ nền và đóng pool.
@@ -20,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from app.agent.grants import init_grants
 from app.agent.graph import build_graph
+from app.agent.models import load_agents_config, recursion_limit
 from app.agent.retention import purge_loop
 from app.agent.tools import ALL_TOOLS
 from app.agent.tools.dashboard_tools import cleanup_loop as dashboard_cleanup_loop
@@ -66,6 +67,14 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             "Thiếu CHECKPOINT_DATABASE_URL: cần database agent_app để lưu người dùng và hội thoại"
         )
+
+    # Cấu hình từng agent (config/agents.yaml): sai thì dừng ngay lúc khởi động, không đợi có người hỏi.
+    agents_cfg = load_agents_config()
+    logger.info(
+        "Agent: %s | max_handoffs=%d | recursion_limit=%d",
+        ", ".join(f"{n}={a.model}" + ("" if a.enabled else " (tắt)") for n, a in agents_cfg.agents.items()),
+        agents_cfg.max_handoffs, recursion_limit(agents_cfg),
+    )
 
     await init_pool()  # pool chỉ-đọc tới database kinh doanh (dùng cho tool SQL)
     try:

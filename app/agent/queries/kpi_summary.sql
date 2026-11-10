@@ -1,6 +1,6 @@
 -- app/agent/queries/kpi_summary.sql
 -- Chỉ số chính của kỳ báo cáo (một dòng): doanh thu, số đơn, giá trị đơn trung bình, số khách.
--- Tham số: start, end_exclusive. Nguồn: dwh.fact_sales (bill POS).
+-- Tham số: start, end_exclusive. Nguồn: dwh.fact_sales (một dòng = một bill).
 -- Cùng định nghĩa với revenue_by_day.sql: doanh thu = final_amount, bỏ bill is_deleted.
 -- customers chỉ đếm khách có mã hội viên (customer_key = -1 là khách vãng lai/đối tác, không đếm).
 

@@ -4,7 +4,7 @@
 # - Đủ max_steps (config/agents.yaml) mà vẫn đòi tool thì ép tổng kết bằng dữ liệu đã có.
 # - Không đưa chữ tổng kết vào messages (tránh tin AI kết thúc hội thoại); lưu ở state[notes_key].
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from app.agent.models import load_agents_config
@@ -17,8 +17,9 @@ FORCE_FINISH = (
 
 
 def make_worker_node(agent: str, tools: list, loop_key: str, steps_key: str, done_key: str, notes_key: str,
-                     extra_sections=None):
-    """extra_sections(state) -> list[str|None]: phần ngữ cảnh thêm vào system prompt (ngoài bản tóm tắt)."""
+                     docs=None, extra_sections=None):
+    """docs() -> list[str]: tài liệu nghiệp vụ CỐ ĐỊNH (được cache). extra_sections(state) -> list[str|None]:
+    ngữ cảnh đổi theo lượt (ngoài bản tóm tắt)."""
 
     async def node(state: dict, config: RunnableConfig) -> dict:
         spec = load_agents_config().get(agent)
@@ -29,7 +30,7 @@ def make_worker_node(agent: str, tools: list, loop_key: str, steps_key: str, don
         sections = [C.brief_section(state.get("brief"))]
         if extra_sections:
             sections += extra_sections(state)
-        system = SystemMessage(content=C.system_text(agent, config, *sections))
+        system = C.system_message(agent, config, docs() if docs else (), *sections)
 
         llm = C.get_llm(agent)
         if tools:

@@ -23,7 +23,8 @@
    SUM các cột của `fact_sales` (bị nhân dòng). Chỉ SUM cột của chính bảng chi tiết.
 10. Không dùng `SELECT *`. Đặt alias cột không trùng nhau (ví dụ `doanh_thu`, `so_bill`).
 11. Chia thì dùng `NULLIF(mẫu_số, 0)`. Số tiền làm tròn bằng `ROUND(x, 0)`.
-12. Không trả số điện thoại đầy đủ của khách. Cần nhận diện thì dùng tên và 3 số cuối.
+12. Không truy vấn số điện thoại, email, địa chỉ, ngày sinh của khách: tài khoản chỉ-đọc đã bị che các cột này
+    (truy vấn sẽ lỗi quyền). Cần nhận diện khách thì dùng `customer_name` và `membership_id`.
 
 ---
 
@@ -204,11 +205,11 @@ CROSS JOIN ky;
 ## 9. Khách chi nhiều nhất
 
 Hỏi: "Top 10 khách hàng chi tiêu nhiều nhất tháng này?"
-Lưu ý: che số điện thoại, chỉ hiện 3 số cuối.
+Lưu ý: không lấy số điện thoại (bị che ở mức database); nhận diện khách bằng tên và mã hội viên.
 
 ```sql
 SELECT c.customer_name,
-       '***' || RIGHT(c.phone_number, 3)  AS sdt,
+       c.membership_id,
        COUNT(*)                           AS so_bill,
        ROUND(SUM(s.final_amount), 0)      AS tong_chi
 FROM dwh.fact_sales s
@@ -217,7 +218,7 @@ WHERE s.is_deleted = FALSE
   AND s.customer_key <> -1
   AND s.tran_date >= date_trunc('month', now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
   AND s.tran_date <= (now() AT TIME ZONE 'Asia/Ho_Chi_Minh')::date
-GROUP BY c.customer_key, c.customer_name, c.phone_number
+GROUP BY c.customer_key, c.customer_name, c.membership_id
 ORDER BY tong_chi DESC
 LIMIT 10;
 ```

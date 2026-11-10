@@ -7,9 +7,9 @@ import logging
 from typing import Optional
 
 from langchain_core.exceptions import OutputParserException
-from langchain_core.messages import SystemMessage
 from langchain_core.runnables import RunnableConfig
 
+from app.agent import knowledge
 from app.agent.contracts import AnalysisBrief
 from app.agent.nodes import _common as C
 from app.agent.periods import PeriodError, resolve_period
@@ -47,7 +47,7 @@ def build_brief(out: Optional[AnalystOutput], question: str) -> AnalysisBrief:
 
 async def analyst_node(state: dict, config: RunnableConfig) -> dict:
     question = C.last_human_text(state["messages"])
-    system = SystemMessage(content=C.system_text("analyst", config))
+    system = C.system_message("analyst", config, [knowledge.business_context(), knowledge.glossary()])
     llm = C.get_llm("analyst").with_structured_output(AnalystOutput)
     out = None
     try:

@@ -11,4 +11,4 @@ Bạn là Analyst: đọc câu hỏi của người dùng và điền bản tóm
 - notes: lưu ý nghiệp vụ ngắn (ngày lễ, khuyến mãi) nếu câu hỏi nhắc tới; nếu không thì để trống.
 - preferred_query: luôn để trống.
 
-Lưu ý nghiệp vụ: doanh thu lấy từ bill POS; "khách mới" là khách có lần mua đầu tiên rơi trong kỳ. Câu hỏi mơ hồ thì chọn cách hiểu hợp lý nhất và ghi giả định vào notes.
+Lưu ý nghiệp vụ: dùng đúng định nghĩa trong tài liệu tham khảo (doanh thu, khách mới...). Câu hỏi mơ hồ thì chọn cách hiểu hợp lý nhất và ghi giả định vào notes.
