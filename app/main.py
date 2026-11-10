@@ -18,6 +18,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
+from app.agent.grants import init_grants
 from app.agent.graph import build_graph
 from app.agent.retention import purge_loop
 from app.agent.tools import ALL_TOOLS
@@ -87,6 +88,7 @@ async def lifespan(app: FastAPI):
             checkpointer = AsyncPostgresSaver(cp_pool)
             await checkpointer.setup()  # tạo bảng checkpoint nếu chưa có
             await init_users(cp_pool)  # tạo bảng users + chat_sessions; nạp users_seed.yaml nếu trống
+            await init_grants(cp_pool)  # tạo bảng data_grants (quyền xem bảng cấp riêng cho staff)
             await init_audit(cp_pool)  # tạo/bổ sung cột bảng audit_log
             # Bảng report_state + cột chat_sessions.kind (phải chạy SAU init_users vì cần bảng chat_sessions)
             await ensure_report_schema(cp_pool)

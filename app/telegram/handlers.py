@@ -3,7 +3,8 @@
 #   /start /help /new /sessions /tuan /thang /dashboard /myid, tin nhắn thường, phản hồi tin lạ,
 #   báo cáo sáng của manager (/reply /baocao /baocao_tat /baocao_bat /baocao_gio),
 #   nút bấm trong /sessions (chuyển/xoá phiên), và lệnh quản trị người dùng
-#   (/adduser /addadmin /removeadmin /removeuser /users).
+#   (/adduser /addadmin /removeadmin /removeuser /users), và cấp quyền xem bảng cho staff
+#   (/capquyen /thuhoi /quyen; boss/manager dùng được).
 # Mọi tin nhắn và nút bấm đi qua middleware trước: chỉ chat riêng, chỉ người có trong bảng
 # agent_state.users (PostgreSQL), tin nhắn quá cũ bị bỏ qua. Người lạ bị im lặng bỏ qua (chỉ ghi
 # log), trừ lệnh /myid để họ lấy được Telegram ID gửi cho quản trị viên.
@@ -23,7 +24,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app.agent.permissions import ROLE_TABLES
+from app.agent.grants import add_grant, list_grants, revoke_grant
+from app.agent.permissions import ROLE_TABLES, can_access_user
 from app.agent.runner import MSG_BUSY, run_turn
 from app.agent.sessions import (
     REPORT_RETENTION_DAYS,
@@ -40,6 +42,7 @@ from app.agent.sessions import (
 )
 from app.audit import log_turn
 from app.config import get_settings
+from app.db.pool import get_pool
 from app.reports.builder import SECTIONS
 from app.reports.subscriptions import (
     REPORT_ROLE,
@@ -57,6 +60,7 @@ from app.telegram.auth import (
     check_manage,
     demote_admin,
     get_allowed_user,
+    get_user,
     list_users,
     log_change,
     remove_user,
@@ -86,6 +90,7 @@ HELP_TEXT = (
     "/dashboard - dashboard doanh thu tuần này\n"
     "/new - bắt đầu cuộc trò chuyện mới\n"
     "/sessions - xem, chuyển hoặc xoá các cuộc trò chuyện\n"
+    "/quyen - xem bạn được xem những dữ liệu nào\n"
     "/help - xem hướng dẫn\n\n"
     f"Lưu ý: mỗi người giữ tối đa {_cfg.max_sessions_per_user} cuộc trò chuyện; cuộc nào "
     f"{_cfg.session_idle_days} ngày không dùng sẽ bị xoá."
@@ -98,6 +103,18 @@ ADMIN_HELP_TEXT = (
     "/addadmin <id> <role> [tên] - thêm hoặc nâng lên admin\n"
     "/removeadmin <id> - gỡ quyền admin\n"
     "/removeuser <id> - xóa người dùng (và toàn bộ cuộc trò chuyện của họ)"
+)
+
+GRANT_HELP_TEXT = (
+    "\n\nCấp quyền xem dữ liệu cho nhân viên (role staff):\n"
+    "/capquyen <id> <schema.table> [số giờ] - cấp quyền xem một bảng\n"
+    "/thuhoi <id> <schema.table|all> - thu hồi quyền\n"
+    "/quyen <id> - xem nhân viên đang được xem những bảng nào"
+)
+
+MSG_STAFF_NO_SHORTCUT = (
+    "Lệnh này dành cho quản lý. Bạn cứ hỏi trực tiếp về dữ liệu mình được cấp, "
+    "gõ /quyen để xem danh sách."
 )
 
 PROMPT_WEEK = (
@@ -118,6 +135,17 @@ MSG_NOT_REGISTERED = "Bạn chưa được đăng ký nhận báo cáo tự đ�
 
 def _is_report_user(user: AllowedUser) -> bool:
     return (user.role or "").lower() == REPORT_ROLE
+
+
+GRANTOR_ROLES = {"boss", "manager"}  # role được cấp/thu hồi quyền xem bảng cho staff
+
+
+def _can_grant(user: AllowedUser) -> bool:
+    return (user.role or "").lower() in GRANTOR_ROLES
+
+
+def _is_staff(user: AllowedUser) -> bool:
+    return (user.role or "").lower() == "staff"
 
 
 def _manager_help(user: AllowedUser) -> str:
@@ -250,13 +278,20 @@ async def cmd_myid(message: Message) -> None:
 async def cmd_start(message: Message, user: AllowedUser) -> None:
     text = f"Xin chào {user.name or ''}!\n\n{HELP_TEXT}".replace("Xin chào !", "Xin chào!")
     text += _manager_help(user)
+    if _can_grant(user):
+        text += GRANT_HELP_TEXT
     if user.is_admin:
         text += ADMIN_HELP_TEXT
     await message.answer(text)
 
 
 async def cmd_help(message: Message, user: AllowedUser) -> None:
-    text = HELP_TEXT + _manager_help(user) + (ADMIN_HELP_TEXT if user.is_admin else "")
+    text = (
+        HELP_TEXT
+        + _manager_help(user)
+        + (GRANT_HELP_TEXT if _can_grant(user) else "")
+        + (ADMIN_HELP_TEXT if user.is_admin else "")
+    )
     await message.answer(text)
 
 
@@ -286,14 +321,23 @@ async def cmd_new(message: Message, user: AllowedUser, graph, pool) -> None:
 
 
 async def cmd_week(message: Message, user: AllowedUser, graph, pool) -> None:
+    if _is_staff(user):
+        await message.answer(MSG_STAFF_NO_SHORTCUT)
+        return
     await _ask(message, user, graph, pool, PROMPT_WEEK)
 
 
 async def cmd_month(message: Message, user: AllowedUser, graph, pool) -> None:
+    if _is_staff(user):
+        await message.answer(MSG_STAFF_NO_SHORTCUT)
+        return
     await _ask(message, user, graph, pool, PROMPT_MONTH)
 
 
 async def cmd_dashboard(message: Message, user: AllowedUser, graph, pool) -> None:
+    if _is_staff(user):
+        await message.answer(MSG_STAFF_NO_SHORTCUT)
+        return
     await _ask(message, user, graph, pool, PROMPT_DASHBOARD)
 
 
@@ -598,6 +642,10 @@ async def cmd_removeuser(message: Message, command: CommandObject, user: Allowed
     if not ok:
         await message.answer("Không có người dùng này.")
         return
+    try:
+        await revoke_grant(str(tid), None)  # xoá luôn quyền xem bảng đã cấp cho người này
+    except Exception:
+        logger.exception("Không xoá được quyền được cấp của %s", tid)
     # Người đã bị xoá thì dữ liệu hội thoại của họ cũng không nên nằm lại đến hết hạn
     try:
         purged = await purge_user_sessions(graph, pool, tid)
@@ -620,6 +668,127 @@ async def cmd_users(message: Message, user: AllowedUser, pool) -> None:
         for r in rows
     ]
     await message.answer("\n".join(lines) or "Chưa có người dùng nào.")
+
+
+# ---------------------------------------------------------------- cấp quyền xem bảng cho staff
+# Chỉ boss/manager dùng được (người khác gõ thì im lặng, trừ /quyen không tham số để xem quyền của
+# chính mình). Quyền lưu ở agent_state.data_grants; muốn cho cả admin cấp thì thêm "or user.is_admin"
+# vào _can_grant.
+
+MAX_GRANT_HOURS = 24 * 365
+_TABLE_RE = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")  # schema.table, không cho "*"
+
+
+async def _table_exists(table: str) -> bool:
+    """Bảng/view có tồn tại và đọc được bằng tài khoản chỉ-đọc không (tránh cấp nhầm tên)."""
+    schema, _, name = table.partition(".")
+    async with get_pool().connection() as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema = %s AND table_name = %s "
+            "AND table_type IN ('BASE TABLE', 'VIEW')",
+            (schema, name),
+        )
+        return await cur.fetchone() is not None
+
+
+async def cmd_capquyen(message: Message, command: CommandObject, user: AllowedUser, pool) -> None:
+    if not _can_grant(user):
+        return
+    usage = (
+        "Cú pháp: /capquyen <telegram_id> <schema.table> [số_giờ]\n"
+        "Ví dụ: /capquyen 123456789 dwh.fact_sales 48"
+    )
+    parts = (command.args or "").split()
+    if len(parts) not in (2, 3) or not parts[0].isdigit():
+        await message.answer(usage)
+        return
+    tid, table = int(parts[0]), parts[1].lower()
+    if not _TABLE_RE.match(table):
+        await message.answer("Tên bảng phải dạng schema.table, ví dụ dwh.fact_sales.")
+        return
+    hours = None
+    if len(parts) == 3:
+        if not parts[2].isdigit() or not 1 <= int(parts[2]) <= MAX_GRANT_HOURS:
+            await message.answer(f"Số giờ phải từ 1 đến {MAX_GRANT_HOURS}. Bỏ trống nếu không giới hạn.")
+            return
+        hours = int(parts[2])
+
+    target = await get_user(pool, tid)
+    if target is None or (target["role"] or "").lower() != "staff":
+        await message.answer(
+            "Chỉ cấp quyền cho người dùng có role staff. Thêm nhân viên bằng /adduser <id> staff [tên]."
+        )
+        return
+    if not await can_access_user(user.role, user.telegram_id, table):
+        await message.answer("Bạn không có quyền xem bảng này nên không cấp được cho người khác.")
+        return
+    try:
+        exists = await _table_exists(table)
+    except Exception:
+        logger.exception("Không kiểm tra được bảng %s", table)
+        await message.answer("Chưa kiểm tra được bảng trong database, bạn thử lại sau nhé.")
+        return
+    if not exists:
+        await message.answer(f"Không tìm thấy bảng {table} trong database.")
+        return
+
+    await add_grant(str(tid), table, by=str(user.telegram_id), hours=hours)
+    await log_change(pool, user.telegram_id, f"grant {tid} {table} hours={hours}")
+    await message.answer(
+        f"Đã cấp cho {tid} quyền xem {table}"
+        + (f" trong {hours} giờ." if hours else ", không giới hạn thời gian.")
+    )
+
+
+async def cmd_thuhoi(message: Message, command: CommandObject, user: AllowedUser, pool) -> None:
+    if not _can_grant(user):
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 2 or not parts[0].isdigit():
+        await message.answer("Cú pháp: /thuhoi <telegram_id> <schema.table|all>")
+        return
+    tid, table = int(parts[0]), parts[1].lower()
+    # Boss và manager đều thu hồi được mọi quyền của mọi nhân viên, bất kể ai đã cấp
+    n = await revoke_grant(str(tid), None if table == "all" else table)
+    if n:
+        await log_change(pool, user.telegram_id, f"revoke {tid} {table} ({n} quyền)")
+        await message.answer(f"Đã thu hồi {n} quyền của {tid}.")
+    else:
+        await message.answer("Không có quyền nào khớp để thu hồi.")
+
+
+async def cmd_quyen(message: Message, command: CommandObject, user: AllowedUser, pool) -> None:
+    """Không tham số: xem quyền của chính mình. /quyen <id>: boss/manager xem của người khác."""
+    arg = (command.args or "").strip()
+    if arg:
+        if not _can_grant(user):
+            return
+        if not arg.isdigit():
+            await message.answer("Cú pháp: /quyen [telegram_id]")
+            return
+        tid = int(arg)
+        target = await get_user(pool, tid)
+        if target is None:
+            await message.answer("Không có người dùng này.")
+            return
+        role = target["role"]
+    else:
+        tid, role = user.telegram_id, user.role
+
+    if (role or "").lower() != "staff":
+        shown = ", ".join(sorted(ROLE_TABLES.get((role or "").lower(), set()))) or "(không có)"
+        await message.answer(f"Role {role} xem theo vai trò: {shown}")
+        return
+    rows = await list_grants(str(tid))
+    if not rows:
+        await message.answer("Chưa được cấp quyền xem bảng nào.")
+        return
+    lines = [
+        f"• {r['table_name']} (hết hạn {_fmt(r['expires_at'])})" if r["expires_at"]
+        else f"• {r['table_name']} (không giới hạn)"
+        for r in rows
+    ]
+    await message.answer("Các bảng được xem:\n" + "\n".join(lines))
 
 
 # ---------------------------------------------------------------- tin còn lại
@@ -661,6 +830,10 @@ def build_router() -> Router:
     router.message.register(cmd_removeadmin, Command("removeadmin"))
     router.message.register(cmd_removeuser, Command("removeuser"))
     router.message.register(cmd_users, Command("users"))
+    # Cấp quyền xem bảng cho staff (boss/manager; /quyen ai cũng xem được quyền của mình)
+    router.message.register(cmd_capquyen, Command("capquyen"))
+    router.message.register(cmd_thuhoi, Command("thuhoi"))
+    router.message.register(cmd_quyen, Command("quyen"))
     router.message.register(on_unknown_command, F.text.startswith("/"))
     router.message.register(on_text, F.text)
     router.message.register(on_other)

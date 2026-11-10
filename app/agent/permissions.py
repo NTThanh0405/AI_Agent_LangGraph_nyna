@@ -1,18 +1,29 @@
 # app/agent/permissions.py
 # Phân quyền xem dữ liệu theo vai trò (user_role): mỗi vai trò được xem những bảng nào.
 # Vai trò lạ hoặc để trống bị từ chối hoàn toàn, kể cả câu SELECT không đụng bảng nào.
-# Đây là lớp phân quyền theo vai trò duy nhất; PostgreSQL chỉ có một role chỉ-đọc dùng
-# chung (agent_readonly) và che cột cá nhân của khách (sql/create_readonly_role.sql).
+# Riêng vai trò staff: mặc định không xem bảng nào, chỉ xem phần boss/manager cấp riêng
+# (bảng agent_state.data_grants, xem app/agent/grants.py).
+# PostgreSQL chỉ có một role chỉ-đọc dùng chung (agent_readonly) và che cột cá nhân của
+# khách (sql/create_readonly_role.sql).
+#
+# Hai nhóm hàm:
+#   - can_access / filter_tables / ensure_access: đồng bộ, CHỈ theo role (staff luôn bị chặn).
+#   - can_access_user / filter_tables_user / ensure_access_user: async, có tính quyền cấp
+#     riêng cho staff. Bắt buộc dùng await.
 
 from typing import Iterable, Optional
 
+from app.agent import grants
+
+STAFF_ROLE = "staff"
+
 # Khoá: vai trò (chữ thường). Giá trị: tập bảng dạng "schema.table";
 # "*" là mọi bảng, "schema.*" là mọi bảng trong schema đó.
-# Danh sách của manager là giả định (bán hàng, đơn online, món, cửa hàng, khuyến mãi,
-# kèm dim_customer đã che cột cá nhân); chưa cho xem hội viên và voucher. Sửa theo nhu cầu.
+# boss và manager được xem mọi bảng trong schema dwh, không xem schema khác.
 ROLE_TABLES: dict[str, set[str]] = {
     "boss": {"dwh.*"},
     "manager": {"dwh.*"},
+    "staff": set(),  # nhân viên: chỉ xem phần được cấp
 }
 
 
@@ -24,12 +35,18 @@ def is_known_role(role: Optional[str]) -> bool:
     return (role or "").lower() in ROLE_TABLES
 
 
-def can_access(role: Optional[str], table: str) -> bool:
-    """Kiểm tra vai trò có được xem bảng "schema.table" không."""
-    patterns = ROLE_TABLES.get((role or "").lower(), set())
+def _match(patterns: set[str], table: str) -> bool:
+    """Bảng "schema.table" có khớp tập quyền không."""
     table = table.lower()
     schema = table.split(".", 1)[0]
     return "*" in patterns or table in patterns or f"{schema}.*" in patterns
+
+
+# ---------------------------------------------------------------- chỉ theo role (đồng bộ)
+
+def can_access(role: Optional[str], table: str) -> bool:
+    """Kiểm tra vai trò có được xem bảng "schema.table" không (không tính quyền cấp riêng)."""
+    return _match(ROLE_TABLES.get((role or "").lower(), set()), table)
 
 
 def filter_tables(role: Optional[str], tables: Iterable[str]) -> list[str]:
@@ -42,6 +59,37 @@ def ensure_access(role: Optional[str], tables: Iterable[str]) -> None:
     if not is_known_role(role):
         raise PermissionDenied("Vai trò không hợp lệ hoặc chưa được cấp quyền")
     denied = sorted(t for t in tables if not can_access(role, t))
+    if denied:
+        raise PermissionDenied(
+            "Không có quyền truy cập các bảng: " + ", ".join(denied)
+        )
+
+
+# ---------------------------------------------------------------- có tính quyền cấp riêng (async)
+
+async def _patterns(role: Optional[str], user_id) -> set[str]:
+    """Tập quyền thực tế: quyền theo role, cộng quyền được cấp riêng nếu là staff."""
+    role_l = (role or "").lower()
+    patterns = set(ROLE_TABLES.get(role_l, set()))
+    if role_l == STAFF_ROLE and user_id:
+        patterns |= await grants.get_grants(str(user_id))
+    return patterns
+
+
+async def can_access_user(role: Optional[str], user_id, table: str) -> bool:
+    return _match(await _patterns(role, user_id), table)
+
+
+async def filter_tables_user(role: Optional[str], user_id, tables: Iterable[str]) -> list[str]:
+    p = await _patterns(role, user_id)  # chỉ truy vấn DB một lần
+    return [t for t in tables if _match(p, t)]
+
+
+async def ensure_access_user(role: Optional[str], user_id, tables: Iterable[str]) -> None:
+    if not is_known_role(role):
+        raise PermissionDenied("Vai trò không hợp lệ hoặc chưa được cấp quyền")
+    p = await _patterns(role, user_id)
+    denied = sorted(t for t in tables if not _match(p, t))
     if denied:
         raise PermissionDenied(
             "Không có quyền truy cập các bảng: " + ", ".join(denied)

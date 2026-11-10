@@ -45,8 +45,8 @@ Chi tiết thuật ngữ xem `glossary.md`.
 ## 6. Nguồn dữ liệu và phân quyền
 - Schema dữ liệu: `dwh`. Agent chỉ đọc (SELECT), không ghi.
 - Vai trò `boss`: xem toàn bộ bảng trong `dwh`.
-- Vai trò `manager`: chỉ xem các bảng bán hàng và danh mục: `fact_sales`, `fact_sale_items`, `fact_online_orders`, `dim_store`, `dim_customer`.
-- Các bảng hội viên, voucher, đặt chỗ, hóa đơn hub (ví dụ `fact_member_vouchers`, `fact_membership_transactions`, `fact_membership_type_changes`, `fact_hub_bills`, `fact_bookings`, `dim_voucher_campaign`) chỉ `boss` xem được. Nếu `manager` hỏi về nhóm này, trả lời lịch sự rằng không có quyền, không cố truy vấn lách.
+- Vai trò `manager`: xem toàn bộ bảng trong `dwh`.
+- Các bảng hội viên, voucher, đặt chỗ, hóa đơn hub (ví dụ `fact_member_vouchers`, `fact_membership_transactions`, `fact_membership_type_changes`, `fact_hub_bills`, `fact_bookings`, `dim_voucher_campaign`) chỉ `boss` và `manager` xem được. Nếu `staff` hỏi về nhóm này, trả lời lịch sự rằng không có quyền, không cố truy vấn lách.
 - Ý nghĩa các bảng hội viên, voucher, booking: [ĐIỀN]
 
 ## 7. Cách đọc biến động

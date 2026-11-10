@@ -13,7 +13,7 @@ from app.agent.permissions import ROLE_TABLES
 logger = logging.getLogger(__name__)
 
 STAFF, ADMIN, OWNER = 0, 1, 2
-MAX_ADMINS = 3  # số admin (cấp 1) tối đa, không tính owner
+MAX_ADMINS = 5  # số admin (cấp 1) tối đa, không tính owner
 _LEVELS = {"staff": STAFF, "admin": ADMIN, "owner": OWNER}
 
 _CREATE_SQL = (

@@ -11,7 +11,7 @@ import psycopg
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app.agent.permissions import PermissionDenied, ensure_access
+from app.agent.permissions import PermissionDenied, ensure_access_user
 from app.config import get_settings
 from app.db.guard import UnsafeSQLError, check_select
 from app.db.pool import get_pool
@@ -52,7 +52,7 @@ async def run_select_query(query: str, config: RunnableConfig) -> str:
 
     try:
         checked = check_select(query, max_rows)
-        ensure_access(role, checked.tables)
+        await ensure_access_user(role, user_id, checked.tables)  # staff: tính cả quyền được cấp riêng
     except (UnsafeSQLError, PermissionDenied) as e:
         return f"Câu SQL bị từ chối: {e}"
 

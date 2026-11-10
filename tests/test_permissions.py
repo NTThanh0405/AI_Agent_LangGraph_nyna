@@ -1,154 +1,302 @@
 # tests/test_permissions.py
-# Kiểm tra phân quyền theo vai trò (boss / manager) và việc nối với guard.check_select.
-# Không kết nối database.
+# Kiểm tra phân quyền xem bảng (app/agent/permissions.py) và quyền cấp riêng cho staff
+# (app/agent/grants.py).
+#
+# Chạy:  pytest tests/test_permissions.py
+#
+# Hai nhóm test:
+#   1) Không cần database: giả lập grants.get_grants, chạy nhanh, luôn chạy được.
+#   2) Cần PostgreSQL thật (kiểm tra hết hạn, thu hồi, dọn dẹp bằng SQL thật). Chỉ chạy khi đặt
+#      biến môi trường TEST_CHECKPOINT_DATABASE_URL trỏ tới database agent_app (hoặc một database
+#      thử nghiệm). Test chỉ đụng tới dòng có grantee_user_id bắt đầu bằng "test-" và tự xoá sau khi chạy.
+#
+# Không cần pytest-asyncio: mỗi test tự gọi asyncio.run.
+
+import asyncio
+import os
 
 import pytest
 
-from app.agent import permissions
-from app.agent.permissions import (
-    ROLE_TABLES,
-    PermissionDenied,
-    can_access,
-    ensure_access,
-    filter_tables,
-    is_known_role,
+from app.agent import grants
+from app.agent import permissions as perm
+from app.agent.permissions import PermissionDenied
+
+TABLE = "dwh.test_orders"
+OTHER_TABLE = "dwh.test_customers"
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+@pytest.fixture
+def fake_grants(monkeypatch):
+    """Giả lập bảng data_grants trong bộ nhớ: store[user_id] = tập bảng được cấp."""
+    store: dict[str, set[str]] = {}
+
+    async def fake_get_grants(user_id):
+        return set(store.get(str(user_id), set()))
+
+    monkeypatch.setattr(grants, "get_grants", fake_get_grants)
+    return store
+
+
+# ================================================================ 1) theo role (không cần DB)
+
+def test_boss_and_manager_see_whole_dwh_schema():
+    for role in ("boss", "manager"):
+        assert perm.can_access(role, "dwh.fact_sales")
+        assert perm.can_access(role, "dwh.dim_store")
+
+
+def test_boss_and_manager_cannot_see_other_schemas():
+    for role in ("boss", "manager"):
+        assert not perm.can_access(role, "acc.salary")
+        assert not perm.can_access(role, "public.users")
+
+
+def test_role_and_table_are_case_insensitive():
+    assert perm.can_access("MANAGER", "DWH.Fact_Sales")
+
+
+def test_unknown_or_empty_role_is_denied():
+    for role in (None, "", "hacker", "admin"):
+        assert not perm.can_access(role, "dwh.fact_sales")
+        assert not perm.is_known_role(role)
+        with pytest.raises(PermissionDenied):
+            perm.ensure_access(role, [])  # kể cả câu SELECT không đụng bảng nào
+
+
+def test_staff_is_known_role_but_sync_api_blocks_everything():
+    # API đồng bộ chỉ theo role: staff luôn bị chặn (an toàn nếu ai đó quên dùng bản _user)
+    assert perm.is_known_role("staff")
+    assert not perm.can_access("staff", "dwh.fact_sales")
+    with pytest.raises(PermissionDenied):
+        perm.ensure_access("staff", ["dwh.fact_sales"])
+
+
+def test_filter_tables_by_role():
+    tables = ["dwh.fact_sales", "acc.salary", "dwh.dim_store"]
+    assert perm.filter_tables("manager", tables) == ["dwh.fact_sales", "dwh.dim_store"]
+    assert perm.filter_tables("staff", tables) == []
+
+
+# ================================================================ 2) staff + quyền cấp riêng (không cần DB)
+
+def test_staff_without_grants_is_denied(fake_grants):
+    assert not run(perm.can_access_user("staff", "u1", TABLE))
+    with pytest.raises(PermissionDenied):
+        run(perm.ensure_access_user("staff", "u1", [TABLE]))
+
+
+def test_staff_with_grant_can_see_only_that_table(fake_grants):
+    fake_grants["u1"] = {TABLE}
+    assert run(perm.can_access_user("staff", "u1", TABLE))
+    assert not run(perm.can_access_user("staff", "u1", OTHER_TABLE))
+    run(perm.ensure_access_user("staff", "u1", [TABLE]))  # không raise
+    with pytest.raises(PermissionDenied) as e:
+        run(perm.ensure_access_user("staff", "u1", [TABLE, OTHER_TABLE]))
+    assert OTHER_TABLE in str(e.value) and TABLE not in str(e.value).replace(OTHER_TABLE, "")
+
+
+def test_grant_is_per_user(fake_grants):
+    fake_grants["u1"] = {TABLE}
+    assert not run(perm.can_access_user("staff", "u2", TABLE))
+
+
+def test_staff_without_user_id_is_denied(fake_grants):
+    fake_grants[""] = {TABLE}
+    fake_grants["None"] = {TABLE}
+    assert not run(perm.can_access_user("staff", None, TABLE))
+    assert not run(perm.can_access_user("staff", "", TABLE))
+
+
+def test_schema_wildcard_grant(fake_grants):
+    fake_grants["u1"] = {"inv.*"}
+    assert run(perm.can_access_user("staff", "u1", "inv.stock"))
+    assert not run(perm.can_access_user("staff", "u1", "acc.salary"))
+
+
+def test_grant_names_are_case_insensitive(fake_grants):
+    fake_grants["u1"] = {TABLE}
+    assert run(perm.can_access_user("STAFF", "u1", TABLE.upper()))
+
+
+def test_grants_do_not_widen_boss_or_manager(fake_grants):
+    # Quyền cấp riêng chỉ áp dụng cho staff; boss/manager vẫn chỉ có {"dwh.*"}
+    fake_grants["m1"] = {"acc.salary"}
+    assert not run(perm.can_access_user("manager", "m1", "acc.salary"))
+    assert run(perm.can_access_user("manager", "m1", "dwh.fact_sales"))
+
+
+def test_unknown_role_denied_even_if_grants_exist(fake_grants):
+    fake_grants["u1"] = {TABLE}
+    assert not run(perm.can_access_user("hacker", "u1", TABLE))
+    with pytest.raises(PermissionDenied):
+        run(perm.ensure_access_user("hacker", "u1", [TABLE]))
+
+
+def test_select_without_tables_is_ok_for_known_role_only(fake_grants):
+    run(perm.ensure_access_user("staff", "u1", []))  # ví dụ SELECT 1
+    with pytest.raises(PermissionDenied):
+        run(perm.ensure_access_user(None, "u1", []))
+
+
+def test_filter_tables_user_for_staff(fake_grants):
+    fake_grants["u1"] = {TABLE}
+    got = run(perm.filter_tables_user("staff", "u1", [TABLE, OTHER_TABLE]))
+    assert got == [TABLE]
+
+
+# ================================================================ lỗi database -> chặn (fail-closed)
+
+def test_get_grants_returns_empty_when_pool_not_initialized(monkeypatch):
+    monkeypatch.setattr(grants, "_pool", None)
+    assert run(grants.get_grants("u1")) == set()
+
+
+def test_database_error_denies_staff(monkeypatch):
+    class BrokenPool:
+        def connection(self):
+            raise RuntimeError("database down")
+
+    monkeypatch.setattr(grants, "_pool", BrokenPool())
+    assert run(grants.get_grants("u1")) == set()
+    assert not run(perm.can_access_user("staff", "u1", TABLE))
+    # boss/manager không phụ thuộc bảng quyền cấp riêng nên không bị ảnh hưởng
+    assert run(perm.can_access_user("manager", "m1", "dwh.fact_sales"))
+
+
+# ================================================================ 3) cần PostgreSQL thật
+
+DB_URL = os.getenv("TEST_CHECKPOINT_DATABASE_URL")
+needs_db = pytest.mark.skipif(
+    not DB_URL, reason="Đặt TEST_CHECKPOINT_DATABASE_URL để chạy test với PostgreSQL thật"
 )
-from app.db.guard import check_select
 
 
-# ---------------------------------------------------------------- vai trò
+async def _with_pool(body):
+    """Mở pool giống app/main.py, init_grants, chạy body(pool), rồi dọn dòng test-*."""
+    from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
 
-def test_known_roles():
-    assert is_known_role("boss")
-    assert is_known_role("manager")
-
-
-def test_role_is_case_insensitive():
-    assert is_known_role("MANAGER")
-    assert can_access("Manager", "DWH.FACT_SALES")
-
-
-@pytest.mark.parametrize("role", [None, "", "hacker", "admin", " boss"])
-def test_unknown_role_rejected(role):
-    assert not is_known_role(role)
-    assert not can_access(role, "dwh.fact_sales")
-
-
-# ------------------------------------------------------------ boss / manager
-
-def test_boss_can_read_everything_in_dwh():
-    assert can_access("boss", "dwh.fact_sales")
-    assert can_access("boss", "dwh.dim_customer")
-    assert can_access("boss", "dwh.fact_member_vouchers")
-    assert can_access("boss", "dwh.bang_moi_tao_sau_nay")
-
-
-def test_boss_cannot_read_other_schemas():
-    assert not can_access("boss", "public.users")
-    assert not can_access("boss", "raw_ipos.events")
+    pool = AsyncConnectionPool(
+        conninfo=DB_URL,
+        min_size=1,
+        max_size=2,
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        open=False,
+    )
+    await pool.open(wait=True)
+    try:
+        async with pool.connection() as conn:
+            await conn.execute("CREATE SCHEMA IF NOT EXISTS agent_state")
+        await grants.init_grants(pool)
+        await body(pool)
+    finally:
+        async with pool.connection() as conn:
+            await conn.execute(
+                "DELETE FROM agent_state.data_grants WHERE grantee_user_id LIKE 'test-%'"
+            )
+        await pool.close()
 
 
-def test_manager_same_as_boss():
-    assert ROLE_TABLES["manager"] == ROLE_TABLES["boss"]
-
-
-@pytest.mark.parametrize("table", [
-    "dwh.fact_sales", "dwh.fact_member_vouchers", "dwh.fact_hub_bills",
-    "dwh.fact_bookings", "dwh.dim_voucher_campaign", "dwh.bang_moi_tao_sau_nay",
-])
-def test_manager_can_read_all_dwh(table):
-    assert can_access("manager", table)
-
-
-def test_manager_cannot_read_other_schemas():
-    assert not can_access("manager", "public.users")
-    assert not can_access("manager", "dwh_evil.fact_sales")
-
-
-# ----------------------------------------------------- tên bảng giả mạo / lạ
-
-def test_table_without_schema_denied():
-    assert not can_access("boss", "fact_sales")
-    assert not can_access("manager", "fact_sales")
-
-
-def test_similar_schema_name_not_matched_by_wildcard():
-    assert not can_access("boss", "dwh_evil.fact_sales")
-
-
-def test_star_wildcard_allows_everything(monkeypatch):
-    monkeypatch.setitem(ROLE_TABLES, "root", {"*"})
-    assert can_access("root", "anything.at_all")
-
-
-# ------------------------------------------------------------ filter_tables
-
-def test_filter_tables_keeps_only_allowed():
-    tables = ["dwh.fact_sales", "dwh.fact_member_vouchers", "dwh.dim_store"]
-    assert filter_tables("manager", tables) == ["dwh.fact_sales", "dwh.dim_store"]
-
-
-def test_filter_tables_unknown_role_returns_nothing():
-    assert filter_tables("hacker", ["dwh.fact_sales"]) == []
-
-
-# ------------------------------------------------------------ ensure_access
-
-def test_ensure_access_ok():
-    ensure_access("manager", ["dwh.fact_sales", "dwh.dim_store"])
-
-
-def test_ensure_access_boss_with_no_tables_ok():
-    ensure_access("boss", [])
-
-
-@pytest.mark.parametrize("role", [None, "", "hacker"])
-def test_ensure_access_unknown_role_denied_even_without_tables(role):
-    with pytest.raises(PermissionDenied):
-        ensure_access(role, [])
-
-
-def test_ensure_access_lists_denied_tables_sorted():
-    with pytest.raises(PermissionDenied) as exc:
-        ensure_access(
-            "manager",
-            ["dwh.fact_sales", "dwh.fact_member_vouchers", "dwh.fact_hub_bills"],
+async def _expire(pool, user_id, table):
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE agent_state.data_grants SET expires_at = now() - interval '1 hour' "
+            "WHERE grantee_user_id = %s AND table_name = %s",
+            (user_id, table),
         )
-    msg = str(exc.value)
-    assert "dwh.fact_hub_bills" in msg
-    assert "dwh.fact_member_vouchers" in msg
-    assert "dwh.fact_sales" not in msg
-    assert msg.index("fact_hub_bills") < msg.index("fact_member_vouchers")
 
 
-# ------------------------------------------- nối guard + permissions (end-to-end)
+@needs_db
+def test_db_grant_without_expiry():
+    async def body(pool):
+        await grants.add_grant("test-1", TABLE, by="test-boss")
+        assert await grants.get_grants("test-1") == {TABLE}
+        rows = await grants.list_grants("test-1")
+        assert rows[0]["table_name"] == TABLE and rows[0]["expires_at"] is None
 
-def test_manager_blocked_from_voucher_table_via_sql():
-    checked = check_select("SELECT * FROM fact_member_vouchers", 100)
-    with pytest.raises(PermissionDenied):
-        ensure_access("manager", checked.tables)
-
-
-def test_manager_allowed_sales_query_via_sql():
-    checked = check_select(
-        "SELECT s.tran_ts FROM fact_sales s JOIN dim_store d ON s.store_key = d.store_key",
-        100,
-    )
-    ensure_access("manager", checked.tables)
+    run(_with_pool(body))
 
 
-def test_cte_trick_cannot_bypass_permissions():
-    # Đặt tên CTE trùng tên bảng thật để lách kiểm tra quyền.
-    checked = check_select(
-        "WITH fact_member_vouchers AS (SELECT * FROM fact_member_vouchers) "
-        "SELECT * FROM fact_member_vouchers",
-        100,
-    )
-    with pytest.raises(PermissionDenied):
-        ensure_access("manager", checked.tables)
+@needs_db
+def test_db_grant_with_hours_has_expiry():
+    async def body(pool):
+        await grants.add_grant("test-1", TABLE, by="test-boss", hours=2)
+        rows = await grants.list_grants("test-1")
+        assert rows[0]["expires_at"] is not None
+
+    run(_with_pool(body))
 
 
-def test_unqualified_table_resolved_to_dwh_for_permission_check():
-    checked = check_select("SELECT * FROM dim_customer", 100)
-    assert checked.tables == frozenset({"dwh.dim_customer"})
-    ensure_access("manager", checked.tables)
+@needs_db
+def test_db_regrant_updates_expiry():
+    async def body(pool):
+        await grants.add_grant("test-1", TABLE, by="test-boss", hours=1)
+        await grants.add_grant("test-1", TABLE, by="test-boss", hours=None)  # đổi thành không giới hạn
+        rows = await grants.list_grants("test-1")
+        assert len(rows) == 1 and rows[0]["expires_at"] is None
+
+    run(_with_pool(body))
+
+
+@needs_db
+def test_db_expired_grant_is_ignored_then_purged():
+    async def body(pool):
+        await grants.add_grant("test-1", TABLE, by="test-boss", hours=1)
+        assert await grants.get_grants("test-1") == {TABLE}
+        await _expire(pool, "test-1", TABLE)
+        assert await grants.get_grants("test-1") == set()       # hết hạn thì không còn tác dụng
+        assert await grants.list_grants("test-1") == []
+        assert await grants.purge_expired() >= 1                # và bị dọn khỏi bảng
+        assert await grants.purge_expired() == 0
+
+    run(_with_pool(body))
+
+
+@needs_db
+def test_db_revoke_one_table_and_all():
+    async def body(pool):
+        await grants.add_grant("test-1", TABLE, by="test-boss")
+        await grants.add_grant("test-1", OTHER_TABLE, by="test-boss")
+        assert await grants.revoke_grant("test-1", TABLE) == 1
+        assert await grants.get_grants("test-1") == {OTHER_TABLE}
+        assert await grants.revoke_grant("test-1", None) == 1   # thu hồi hết
+        assert await grants.get_grants("test-1") == set()
+        assert await grants.revoke_grant("test-1", None) == 0
+
+    run(_with_pool(body))
+
+
+@needs_db
+def test_db_revoke_only_by_limits_to_that_grantor():
+    async def body(pool):
+        await grants.add_grant("test-1", TABLE, by="test-m1")
+        assert await grants.revoke_grant("test-1", TABLE, only_by="test-m2") == 0
+        assert await grants.get_grants("test-1") == {TABLE}
+        assert await grants.revoke_grant("test-1", TABLE, only_by="test-m1") == 1
+
+    run(_with_pool(body))
+
+
+@needs_db
+def test_db_end_to_end_staff_permission_lifecycle():
+    async def body(pool):
+        # chưa cấp -> chặn
+        assert not await perm.can_access_user("staff", "test-1", TABLE)
+        # cấp -> xem được, bảng khác vẫn bị chặn
+        await grants.add_grant("test-1", TABLE, by="test-boss", hours=1)
+        assert await perm.can_access_user("staff", "test-1", TABLE)
+        assert not await perm.can_access_user("staff", "test-1", OTHER_TABLE)
+        # hết hạn -> chặn lại
+        await _expire(pool, "test-1", TABLE)
+        assert not await perm.can_access_user("staff", "test-1", TABLE)
+        # cấp lại rồi thu hồi -> chặn
+        await grants.add_grant("test-1", TABLE, by="test-boss")
+        assert await perm.can_access_user("staff", "test-1", TABLE)
+        await grants.revoke_grant("test-1", TABLE)
+        assert not await perm.can_access_user("staff", "test-1", TABLE)
+
+    run(_with_pool(body))
