@@ -50,3 +50,14 @@ def get_pool() -> AsyncConnectionPool:
     if _pool is None:
         raise RuntimeError("Connection pool chưa được khởi tạo (init_pool chưa chạy)")
     return _pool
+
+
+def get_data_pool(role: Optional[str] = None) -> AsyncConnectionPool:
+    """Pool dữ liệu kinh doanh dùng cho báo cáo tự động (reports/scheduler.py gọi với role người nhận).
+
+    Hiện chỉ có MỘT pool chỉ-đọc dùng chung (agent_readonly); phân quyền theo role do tầng ứng dụng
+    đảm nhiệm (permissions.can_access trong reports/builder.py). Tham số `role` được giữ để sau này
+    muốn tách mỗi role một tài khoản PostgreSQL thì chỉ sửa ở đây, không phải sửa nơi gọi.
+    Pool này trả về dòng dạng tuple (không dict_row), builder.py xử lý được cả hai dạng.
+    """
+    return get_pool()

@@ -26,7 +26,7 @@ from app.agent.tools.dashboard_tools import cleanup_loop as dashboard_cleanup_lo
 from app.api.v1.router import api_router
 from app.audit import init_audit
 from app.config import get_settings
-from app.db.pool import close_pool, get_pool, init_pool
+from app.db.pool import close_pool, get_data_pool, init_pool
 from app.reports.scheduler import report_loop
 from app.reports.subscriptions import ensure_schema as ensure_report_schema
 from app.reports.subscriptions import get_store
@@ -42,11 +42,8 @@ logger = logging.getLogger(__name__)
 
 
 def _bot_token() -> str:
-    """Token bot Telegram, dùng cho Bot gửi báo cáo sáng. Sửa tên biến nếu settings của bạn đặt khác."""
-    token = getattr(settings, "telegram_bot_token", None)
-    if token is None:
-        raise RuntimeError("Không tìm thấy token bot trong settings: sửa _bot_token() trong app/main.py")
-    return token.get_secret_value() if hasattr(token, "get_secret_value") else token
+    """Token bot Telegram, dùng cho Bot gửi báo cáo sáng (settings.telegram_bot_token là bắt buộc)."""
+    return settings.telegram_bot_token.get_secret_value()
 
 
 def _on_bot_done(task: asyncio.Task) -> None:
@@ -113,7 +110,7 @@ async def lifespan(app: FastAPI):
                 asyncio.create_task(purge_loop(cp_pool, app.state.graph)),
                 # Gửi báo cáo sáng cho manager theo config/reports.yaml (kiểm tra mỗi 60 giây)
                 asyncio.create_task(
-                    report_loop(report_bot, app.state.graph, cp_pool, lambda role: get_pool(), get_store()),
+                    report_loop(report_bot, app.state.graph, cp_pool, get_data_pool, get_store()),
                     name="report-loop",
                 ),
             ]

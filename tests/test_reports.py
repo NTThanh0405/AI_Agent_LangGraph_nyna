@@ -222,7 +222,7 @@ class FakePool:
                 cols, rows = pool.data.get(key, (["revenue", "orders"], []))
                 return SimpleNamespace(
                     description=[SimpleNamespace(name=c) for c in cols],
-                    fetchall=lambda rows=rows: _aw(rows),
+                    fetchmany=lambda n, rows=rows: _aw(rows[:n]),  # builder v2 dùng fetchmany(MAX_FETCH_ROWS)
                 )
 
         yield Conn()
@@ -240,8 +240,7 @@ def queries(tmp_path, monkeypatch):
     monkeypatch.setattr(builder, "QUERY_DIR", tmp_path)
     # Giả lập quyền để test không phụ thuộc ROLE_TABLES thật: chỉ bảng salaries bị cấm
     monkeypatch.setattr(builder, "can_access", lambda role, table: table != "public.salaries")
-    builder._load_sql.cache_clear()
-    builder._tables_of.cache_clear()
+    builder._prepare.cache_clear()  # v2: file SQL đi qua guard.check_template rồi được giữ trong RAM
     return tmp_path
 
 
@@ -319,23 +318,30 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(scheduler, "SEND_GAP_SECONDS", 0)
     scheduler._attempts.clear()
     log = SimpleNamespace(marked=[], threads=[], states={}, role="manager", user_exists=True,
-                          build_calls=0, build_fail=False)
+                          build_calls=0, build_fail=False, skipped=[], audit=[], mark_sent_fails=False)
 
     async def load_states(pool): return log.states
-    async def mark_sent(pool, uid, day): log.marked.append((uid, day))
+    async def mark_sent(pool, uid, day):
+        if log.mark_sent_fails:
+            raise RuntimeError("DB lỗi khi ghi report_state")
+        log.marked.append((uid, day))
     async def get_user(pool, uid): return SimpleNamespace(role=log.role) if log.user_exists else None
-    async def build_report(pool, role, sections, today=None):
+    async def build_report(pool, role, sections, today=None, commentary=None, **kw):
         log.build_calls += 1
         if log.build_fail:
             raise builder.ReportError("lỗi giả")
         return builder.BuiltReport("📊 Báo cáo giả", None, ("kpi_summary",), (), ())
     async def record(graph, pool, uid, role, text, title, today): log.threads.append((uid, text, title))
+    async def mark_skipped(pool, uid, day): log.skipped.append((uid, day))
+    async def log_turn(pool, **kw): log.audit.append(kw)
 
     monkeypatch.setattr(scheduler, "load_states", load_states)
     monkeypatch.setattr(scheduler, "mark_sent", mark_sent)
     monkeypatch.setattr(scheduler, "get_allowed_user", get_user)
     monkeypatch.setattr(scheduler, "build_report", build_report)
     monkeypatch.setattr(scheduler, "_record_thread", record)
+    monkeypatch.setattr(scheduler, "mark_skipped", mark_skipped)
+    monkeypatch.setattr(scheduler, "log_turn", log_turn)
 
     cfg_path = write(tmp_path, "footer: 'Gõ /reply để hỏi tiếp'\nmanagers:\n  111: {sections: [kpi_summary], send_time: '07:00'}")
     log.store = ConfigStore(cfg_path, SECTIONS)
@@ -375,7 +381,10 @@ def test_repeated_failure_gives_up_after_max_attempts(env):
     bot = FakeBot()
     for minute in range(10):
         run(env, bot, at(7, minute))
-    assert env.build_calls == scheduler.MAX_ATTEMPTS_PER_DAY and bot.sent == [] and env.marked == []
+    max_attempts = scheduler._max_attempts(env.store.get())      # retry_on_error + 1 (mặc định 2 + 1)
+    assert env.build_calls == max_attempts and bot.sent == [] and env.marked == []
+    assert env.skipped == [(111, TODAY)]                         # bỏ cuộc thì ghi vào DB, restart cũng không thử lại
+    assert env.audit[-1]["status"] == "error"
     # sang ngày mới thì được thử lại
     env.build_fail = False
     assert run(env, bot, at(7, 0, day=date(2026, 11, 7))) == 1
@@ -427,3 +436,60 @@ def test_report_in_thread_gives_context_to_followup(monkeypatch):
     assert registered == [(111, "tg:111:report:20261106", "Báo cáo 06/11")]
     assert seen["history"][0] == ("AIMessage", "BÁO CÁO: doanh thu 11 triệu")   # agent thấy báo cáo trước
     assert seen["history"][1][0] == "HumanMessage"
+
+# ------------------------------------------------------------ v2: bỏ lỡ giờ, ghi DB lỗi, retry_on_error
+def test_late_report_is_skipped_once_with_audit(env):
+    bot = FakeBot()
+    assert run(env, bot, at(10, 30)) == 0 and bot.sent == []         # quá 180 phút sau 07:00
+    assert env.skipped == [(111, TODAY)]
+    assert [a["status"] for a in env.audit] == ["skipped_late"]
+    env.states[111] = ReportState(last_skipped_on=TODAY)             # DB đã ghi nhận
+    run(env, bot, at(10, 31))
+    assert env.skipped == [(111, TODAY)] and len(env.audit) == 1     # đúng 1 lần/ngày
+
+
+def test_mark_sent_failure_does_not_resend_every_minute(env):
+    env.mark_sent_fails = True
+    bot = FakeBot()
+    assert run(env, bot, at(7, 0)) == 1 and len(bot.sent) == 1
+    for minute in range(1, 6):
+        run(env, bot, at(7, minute))
+    assert len(bot.sent) == 1                                        # chặn trong RAM đến hết hôm nay
+    assert run(env, bot, at(7, 0, day=date(2026, 11, 7))) == 1       # sang ngày mới thì gửi lại bình thường
+
+
+def test_retry_on_error_is_configurable(env, tmp_path):
+    path = write(tmp_path, "retry_on_error: 0\nmanagers:\n  111: {sections: [kpi_summary], send_time: '07:00'}")
+    env.store = ConfigStore(path, SECTIONS)
+    env.build_fail = True
+    bot = FakeBot()
+    for minute in range(5):
+        run(env, bot, at(7, minute))
+    assert env.build_calls == 1                                      # retry_on_error = 0: thử đúng 1 lần
+
+
+# ------------------------------------------------------------ v2: file SQL đi qua guard.check_template
+def test_unsafe_sql_file_is_reported_as_failed_not_executed(queries):
+    (queries / "top_products.sql").write_text("DELETE FROM public.orders", encoding="utf-8")
+    builder._prepare.cache_clear()
+    pool = FakePool(DATA)
+    rep = build(pool, ["kpi_summary", "top_products"])
+    assert rep.failed == ("top_products",) and rep.ok == ("kpi_summary",)
+    assert all("DELETE" not in sql.upper() for sql, _ in pool.calls)   # câu nguy hiểm không bao giờ tới DB
+
+
+def test_sql_param_outside_convention_is_rejected(queries):
+    (queries / "top_products.sql").write_text("SELECT 1 FROM public.orders WHERE a = %(evil)s", encoding="utf-8")
+    builder._prepare.cache_clear()
+    assert build(FakePool(DATA), ["kpi_summary", "top_products"]).failed == ("top_products",)
+
+
+def test_executed_sql_is_the_guard_output_with_default_schema(queries, monkeypatch):
+    (queries / "kpi_summary.sql").write_text(
+        "SELECT sum(final_amount) AS revenue FROM fact_sales WHERE tran_date >= %(start)s AND tran_date < %(end_exclusive)s",
+        encoding="utf-8")
+    builder._prepare.cache_clear()
+    pool = FakePool({("kpi", D(2026, 11, 5)): (["revenue"], [(5,)])})
+    build(pool, ["kpi_summary"])
+    assert "dwh.fact_sales" in pool.calls[0][0].lower()                # bảng thiếu schema được gán dwh trước khi chạy
+    assert set(pool.calls[0][1]) == {"start", "end", "end_exclusive"}

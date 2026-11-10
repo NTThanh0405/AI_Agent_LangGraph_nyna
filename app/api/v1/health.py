@@ -1,5 +1,5 @@
 # app/api/v1/health.py
-# Các endpoint kiểm tra sức khoẻ dịch vụ (không cần x-api-key):
+# Các endpoint kiểm tra sức khoẻ dịch vụ (không cần xác thực):
 #   GET /api/v1/health          -> app còn sống không (dùng cho Docker HEALTHCHECK)
 #   GET /api/v1/health/db       -> app có kết nối được tới PostgreSQL không (chờ tối đa 3 giây)
 #   GET /api/v1/health/reports  -> vòng gửi báo cáo tự động: lần chạy gần nhất, có đang chạy đều không

@@ -1,10 +1,12 @@
 # app/agent/graph.py
-# Dựng graph LangGraph cho agent phân tích dữ liệu (vòng lặp ReAct):
-#   START -> chat -> (có gọi tool?) -- có --> tools -> chat -> ... -> END
-#                                   -- không -> END
-# Node "chat" để LLM quyết định gọi tool; node "tools" chạy tool (truy vấn PostgreSQL)
-# rồi trả kết quả về cho "chat". Tool lỗi được trả về cho LLM dưới dạng ToolMessage
-# thay vì làm sập cả lượt. Hội thoại nhớ theo thread_id qua checkpointer (mặc định RAM).
+# Graph v2 (supervisor + 3 worker):
+#   START -> supervisor -+-> analyst --------------> supervisor
+#                        +-> coder <-> coder_tools -> supervisor
+#                        +-> designer <-> designer_tools -> supervisor
+#                        +-> chat -> END         (soạn câu trả lời cuối)
+#                        +-> END                 (đường tắt: báo cáo đã có sẵn câu trả lời)
+# Chống lặp: supervisor giới hạn max_handoffs, mỗi worker giới hạn max_steps (config/agents.yaml),
+# runner đặt recursion_limit theo models.recursion_limit().
 
 from typing import Optional, Sequence
 
@@ -12,25 +14,57 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
 
+from app.agent.nodes._common import make_tool_node
+from app.agent.nodes.analyst import analyst_node
 from app.agent.nodes.chat import chat_node
+from app.agent.nodes.coder import make_coder_node
+from app.agent.nodes.designer import make_designer_node
+from app.agent.nodes.supervisor import END_MARK, route_from_supervisor, supervisor_node
 from app.agent.state import AgentState
+from app.agent.tools import TOOLS_BY_AGENT
 
 
-def build_graph(
-    tools: Sequence[BaseTool],
-    checkpointer: Optional[BaseCheckpointSaver] = None,
-):
-    """Tạo và compile graph. Bỏ trống checkpointer thì dùng MemorySaver (mất khi restart)."""
-    builder = StateGraph(AgentState)
-    builder.add_node("chat", chat_node)
-    builder.add_node("tools", ToolNode(list(tools), handle_tool_errors=True))
+def _tools_for(agent: str, allowed: Optional[set[str]]) -> list[BaseTool]:
+    return [t for t in TOOLS_BY_AGENT.get(agent, []) if allowed is None or t.name in allowed]
 
-    builder.add_edge(START, "chat")
-    builder.add_conditional_edges("chat", tools_condition, {"tools": "tools", END: END})
-    builder.add_edge("tools", "chat")
 
-    return builder.compile(
-        checkpointer=checkpointer if checkpointer is not None else MemorySaver()
+def build_graph(tools: Optional[Sequence[BaseTool]] = None, checkpointer: Optional[BaseCheckpointSaver] = None):
+    """`tools` (tuỳ chọn, tương thích v1): nếu truyền thì mỗi agent chỉ được dùng phần giao của
+    danh sách của nó với `tools`. Bỏ trống checkpointer thì dùng MemorySaver (mất khi restart)."""
+    allowed = {t.name for t in tools} if tools is not None else None
+    coder_tools = _tools_for("coder", allowed)
+    designer_tools = _tools_for("designer", allowed)
+
+    g = StateGraph(AgentState)
+    g.add_node("supervisor", supervisor_node)
+    g.add_node("analyst", analyst_node)
+    g.add_node("coder", make_coder_node(coder_tools))
+    g.add_node("coder_tools", make_tool_node("coder", coder_tools, "coder_messages"))
+    g.add_node("designer", make_designer_node(designer_tools))
+    g.add_node("designer_tools", make_tool_node("designer", designer_tools, "designer_messages"))
+    g.add_node("chat", chat_node)
+
+    g.add_edge(START, "supervisor")
+    g.add_conditional_edges(
+        "supervisor", route_from_supervisor,
+        {"analyst": "analyst", "coder": "coder", "designer": "designer", "chat": "chat", END_MARK: END},
     )
+    g.add_edge("analyst", "supervisor")
+    def _after_worker(agent: str):
+        """Worker xong (đã tổng kết) -> về supervisor; chưa -> chạy tool của chính nó."""
+        done_key, tools_node = f"{agent}_done", f"{agent}_tools"
+
+        def route(state: dict) -> str:
+            return "supervisor" if state.get(done_key) else tools_node
+        return route
+
+    for worker in ("coder", "designer"):
+        g.add_conditional_edges(
+            worker, _after_worker(worker),
+            {"supervisor": "supervisor", f"{worker}_tools": f"{worker}_tools"},
+        )
+        g.add_edge(f"{worker}_tools", worker)
+    g.add_edge("chat", END)
+
+    return g.compile(checkpointer=checkpointer if checkpointer is not None else MemorySaver())

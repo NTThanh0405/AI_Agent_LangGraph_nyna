@@ -7,13 +7,13 @@
 #
 # Cấu hình trong .env (xem thêm .env mẫu):
 #   TELEGRAM_BOT_TOKEN, DATABASE_URL..., API key LLM
-#   DASHBOARD_BASE_URL=https://dashboard.nynadatacoffee.com
+#   DASHBOARD_BASE_URL=https://dashboard.nynahouse.com   (phải trùng Public Hostname bên dưới)
 #   DASHBOARD_TTL_HOURS=24
 #   CLOUDFLARE_TUNNEL_TOKEN=...
 #   CLOUDFLARED_IMAGE_TAG=latest   (nên ghim phiên bản đang chạy ổn, xem bằng: docker compose images)
 #
 # Cloudflare Zero Trust > Networks > Tunnels > Public Hostname:
-#   dash.nynadatacoffee.com  ->  HTTP  ->  dashboards-web:80
+#   dashboard.nynahouse.com  ->  HTTP  ->  dashboards-web:80
 
 services:
   agent:
@@ -26,8 +26,12 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - dashboards:/data/dashboards          # agent ghi file dashboard vào đây
+      # config/ (reports.yaml, users_seed.yaml, thresholds.yaml, targets.yaml...) không nằm trong image.
+      # Mount chỉ đọc: sửa reports.yaml trên máy chủ là service tự nạp lại trong 1 phút, không cần restart.
+      - ./config:/code/config:ro
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      # Cổng 8080 và đường dẫn /api/v1/health khớp với CMD trong Dockerfile và router
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v1/health', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3

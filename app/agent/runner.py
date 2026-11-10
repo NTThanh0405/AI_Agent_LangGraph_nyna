@@ -15,7 +15,9 @@ import anthropic
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 
+from app.agent.models import recursion_limit
 from app.agent.sessions import get_lock, get_or_create_active, reset, touch_session
+from app.agent.state import new_turn_state
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -89,13 +91,10 @@ async def run_turn(graph, pool, *, user_id: str, role: str, message: str) -> Tur
             "user_id": user_id,
             "user_role": role,
         },
-        "recursion_limit": settings.graph_max_steps,
+        "recursion_limit": recursion_limit(),  # theo config/agents.yaml (graph v2 nhiều node hơn v1)
     }
-    initial_state = {
-        "messages": [HumanMessage(content=message)],
-        "user_id": user_id,
-        "user_role": role,
-    }
+    # Đặt lại mọi trường điều phối của lượt trước (brief, bước, ghi chú...) cùng với tin mới.
+    initial_state = new_turn_state(user_id, role, HumanMessage(content=message))
 
     started = time.monotonic()
     async with lock:

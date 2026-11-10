@@ -27,10 +27,6 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr
     telegram_bot_token: SecretStr  # token từ @BotFather
 
-    # Không còn n8n gọi vào agent nên không bắt buộc. Chỉ đặt nếu bạn mở lại endpoint
-    # nội bộ bảo vệ bằng header x-api-key (app/api/deps.py). Nếu đặt thì tối thiểu 32 ký tự.
-    service_api_key: Optional[SecretStr] = None
-
     model_name: str = "claude-sonnet-5-5"
     temperature: Optional[float] = None
     max_tokens: int = 4096  # create_dashboard nhiều biểu đồ cần chỗ cho JSON của tool call
@@ -60,6 +56,12 @@ class Settings(BaseSettings):
     session_title_max_chars: int = 40   # độ dài tiêu đề phiên (lấy từ câu hỏi đầu tiên)
     audit_retention_days: int = 30      # số ngày giữ audit_log
 
+    # ---- Báo cáo tự động (app/reports/) ----
+    # Giờ gửi, người nhận, mục, timezone, số lần thử lại... nằm trong config/reports.yaml
+    # (đổi đường dẫn bằng biến môi trường REPORTS_CONFIG), không đặt ở đây.
+    report_commentary_model: str = "claude-haiku-5-5"  # model rẻ cho 2-3 dòng nhận xét (commentary.py)
+    report_commentary_timeout: int = 20                # giây; quá thì gửi báo cáo không có nhận xét
+
     # ---- Dashboard ----
     # "file": bot gửi file HTML qua Telegram. "link": ghi file vào dashboard_dir,
     # nginx phục vụ và bot gửi link (cần dashboard_base_url).
@@ -72,13 +74,6 @@ class Settings(BaseSettings):
     checkpoint_database_url: Optional[SecretStr] = None  # bỏ trống -> MemorySaver (RAM)
 
     log_level: str = "INFO"
-
-    @field_validator("service_api_key")
-    @classmethod
-    def _service_key_long_enough(cls, v: Optional[SecretStr]) -> Optional[SecretStr]:
-        if v is not None and len(v.get_secret_value()) < 32:
-            raise ValueError("SERVICE_API_KEY phải dài ít nhất 32 ký tự")
-        return v
 
     @field_validator("timezone")
     @classmethod

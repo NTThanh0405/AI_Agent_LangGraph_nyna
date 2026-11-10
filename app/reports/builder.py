@@ -3,10 +3,16 @@
 # app/agent/queries/ (KHÔNG để LLM sinh SQL lúc 7h sáng), so với kỳ trước, rồi ghép thành tin
 # nhắn chữ thuần. Cùng nguồn "hôm qua" với agent (app/agent/periods.py) nên số liệu khớp nhau.
 #
-# QUY ƯỚC CHO FILE SQL trong queries/ (đổi _params() nếu file của bạn dùng kiểu khác):
+# AN TOÀN: mỗi file SQL đi qua guard.check_template(). Câu SQL được CHẠY là chuỗi guard trả về
+# (đã gán schema cho bảng thiếu schema), không phải nội dung gốc của file, nên bảng được kiểm tra
+# quyền và bảng thực sự đọc luôn là một.
+#
+# QUY ƯỚC CHO FILE SQL trong queries/ (đổi _params() và PARAM_NAMES nếu file của bạn dùng kiểu khác):
 #   dùng tham số tên của psycopg: %(start)s (ngày đầu, gồm), %(end)s (ngày cuối, gồm),
 #   %(end_exclusive)s (ngày sau ngày cuối, dùng cho  col >= %(start)s AND col < %(end_exclusive)s).
+#   Ký tự % thật (ví dụ LIKE 'a%') phải viết %%. Chỉ được là một câu SELECT.
 # Bảng mà mỗi mục dùng được đọc tự động từ chính câu SQL để kiểm tra quyền (permissions.py).
+# File SQL được nạp một lần rồi giữ trong RAM: sửa file trong queries/ thì phải restart service.
 
 import asyncio
 import logging
@@ -20,13 +26,14 @@ from typing import Awaitable, Callable, Optional
 
 from app.agent.periods import Period, comparison_periods, resolve_period, today_local
 from app.agent.permissions import can_access
-from app.db.guard import UnsafeSQLError, check_select
+from app.db.guard import CheckedQuery, UnsafeSQLError, check_template
 
 logger = logging.getLogger(__name__)
 
 QUERY_DIR = Path(__file__).resolve().parents[1] / "agent" / "queries"
 MAX_FETCH_ROWS = 50
 TELEGRAM_LIMIT = 4000  # giới hạn thật là 4096, chừa chỗ an toàn
+PARAM_NAMES = frozenset({"start", "end", "end_exclusive"})  # khớp _params() bên dưới
 
 
 class ReportError(Exception):
@@ -129,19 +136,12 @@ class Result:
     rows: list  # list các tuple
 
 
-_PARAM_RE = re.compile(r"%\((\w+)\)s")
-
-
 @lru_cache(maxsize=64)
-def _load_sql(file: str) -> str:
-    return (QUERY_DIR / file).read_text(encoding="utf-8-sig").strip().rstrip(";")
-
-
-@lru_cache(maxsize=64)
-def _tables_of(sql: str) -> frozenset:
-    """Các bảng mà câu SQL dùng, để kiểm tra quyền. Thay tham số bằng ngày giả cho parser đọc được;
-    check_select cũng đảm bảo file SQL chỉ là SELECT."""
-    return check_select(_PARAM_RE.sub("'2000-01-01'", sql), 1).tables
+def _prepare(file: str) -> CheckedQuery:
+    """Đọc file SQL và cho qua guard: chỉ một câu SELECT, bảng được gán schema, tham số hợp lệ.
+    Kết quả (SQL an toàn + tập bảng) được giữ trong RAM. Lỗi thì raise, lru_cache không nhớ lỗi."""
+    raw = (QUERY_DIR / file).read_text(encoding="utf-8-sig").strip().rstrip(";")
+    return check_template(raw, allowed_params=PARAM_NAMES)
 
 
 def _params(p: Period) -> dict:
@@ -151,9 +151,9 @@ def _params(p: Period) -> dict:
 async def _fetch(pool, sql: str, period: Period) -> Result:
     async with pool.connection() as conn:
         cur = await conn.execute(sql, _params(period))
-        rows = await cur.fetchall()
+        rows = await cur.fetchmany(MAX_FETCH_ROWS)
         columns = [c.name for c in cur.description]
-    tuples = [tuple(r.values()) if isinstance(r, dict) else tuple(r) for r in rows[:MAX_FETCH_ROWS]]
+    tuples = [tuple(r.values()) if isinstance(r, dict) else tuple(r) for r in rows]
     return Result(columns, tuples)
 
 
@@ -275,7 +275,6 @@ async def build_report(
     """Dựng báo cáo ngày hôm qua cho `role`, gồm các mục trong `sections`.
 
     - commentary: hàm async nhận chữ báo cáo, trả 2-3 dòng nhận xét (reports/commentary.py). None = không nhận xét.
-
     - Mục vượt quyền của role: bỏ qua (phòng trường hợp bị hạ quyền sau khi admin đã cấu hình).
     - Mục lỗi: ghi một dòng cảnh báo trong báo cáo, các mục khác vẫn gửi.
     - Không mục nào chạy được: raise ReportError để bộ lập lịch thử lại, không gửi tin rỗng.
@@ -290,18 +289,17 @@ async def build_report(
             failed.append(key)
             continue
         try:
-            sql = _load_sql(section.sql_file)
-            tables = _tables_of(sql)
-        except (OSError, UnsafeSQLError, ValueError):
-            logger.exception("Không đọc được file SQL của mục '%s'", key)
+            checked = _prepare(section.sql_file)
+        except (OSError, UnsafeSQLError):
+            logger.exception("File SQL của mục '%s' không đọc được hoặc không an toàn", key)
             failed.append(key)
             continue
-        if any(not can_access(role, t) for t in tables):
+        if any(not can_access(role, t) for t in checked.tables):
             logger.warning("Mục '%s' vượt quyền của role '%s', bỏ qua", key, role)
             denied.append(key)
             continue
         try:
-            lines = await _run_section(pool, sql, section, period)
+            lines = await _run_section(pool, checked.sql, section, period)
         except Exception:
             logger.exception("Chạy mục '%s' lỗi", key)
             failed.append(key)

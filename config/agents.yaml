@@ -1,0 +1,41 @@
+# config/agents.yaml
+# Cấu hình từng agent trong graph: model, số bước tối đa, timeout.
+# Agent nào dùng tool nào KHÔNG khai báo ở đây mà ở code (app/agent/tools/__init__.py: TOOLS_BY_AGENT),
+# vì tool là quyền hạn bảo mật, không nên đổi bằng một file cấu hình.
+# File được nạp khi service khởi động (đổi xong cần restart).
+# Tên model: khớp mã API của Anthropic (ví dụ claude-sonnet-5-5, claude-haiku-5-5).
+
+default:
+  temperature: 0
+  max_tokens: 4096
+
+agents:
+  supervisor:           # điều phối + tổng hợp câu trả lời cuối, không có tool dữ liệu
+    enabled: true
+    model: claude-sonnet-5-5
+    max_steps: 1        # số vòng tool tối đa mỗi lần được gọi
+    timeout_seconds: 45
+  analyst:              # hiểu câu hỏi -> AnalysisBrief
+    enabled: true
+    model: claude-sonnet-5-5
+    max_steps: 4
+    timeout_seconds: 45
+  coder:                # viết/chạy SQL
+    enabled: true
+    model: claude-sonnet-5-5
+    max_steps: 6
+    timeout_seconds: 60
+  designer:             # biểu đồ, dashboard
+    enabled: true
+    model: claude-haiku-5-5
+    max_steps: 4
+    timeout_seconds: 60
+    max_tokens: 6000    # JSON của dashboard nhiều biểu đồ cần chỗ
+  reviewer:             # tuỳ chọn: soát lại kết quả trước khi trả; tắt để tiết kiệm chi phí
+    enabled: false
+    model: claude-haiku-5-5
+    max_steps: 1
+    timeout_seconds: 30
+
+# Tổng số lần chuyển giữa các agent trong một câu hỏi (chống lặp vô hạn); graph dùng làm recursion_limit.
+max_handoffs: 8

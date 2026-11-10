@@ -4,7 +4,7 @@
 
 import pytest
 
-from app.db.guard import CheckedQuery, UnsafeSQLError, check_select
+from app.db.guard import CheckedQuery, UnsafeSQLError, check_select, check_template
 
 
 def test_unsafe_error_is_value_error():
@@ -172,3 +172,54 @@ def test_blocks_select_into():
 def test_blocks_select_for_update():
     with pytest.raises(UnsafeSQLError):
         check_select("SELECT * FROM fact_sales FOR UPDATE", 100)
+
+# ================================================= check_template (file SQL viết sẵn trong queries/)
+
+PARAMS = frozenset({"start", "end", "end_exclusive"})
+TPL = "SELECT SUM(final_amount) AS revenue FROM fact_sales WHERE tran_date >= %(start)s AND tran_date < %(end_exclusive)s"
+
+
+def test_template_keeps_named_params_and_adds_schema():
+    q = check_template(TPL, allowed_params=PARAMS)
+    assert q.tables == frozenset({"dwh.fact_sales"})
+    assert "%(start)s" in q.sql and "%(end_exclusive)s" in q.sql
+    assert "dwh.fact_sales" in q.sql.lower()
+
+
+def test_template_is_not_wrapped_with_limit():
+    assert "LIMIT" not in check_template(TPL, allowed_params=PARAMS).sql.upper()
+
+
+def test_template_own_limit_is_kept():
+    q = check_template("SELECT item_id FROM dim_item ORDER BY item_id LIMIT 20", allowed_params=PARAMS)
+    assert q.sql.rstrip().endswith("LIMIT 20")
+
+
+def test_template_rejects_unknown_param():
+    with pytest.raises(UnsafeSQLError):
+        check_template("SELECT 1 FROM fact_sales WHERE a = %(evil)s", allowed_params=PARAMS)
+
+
+@pytest.mark.parametrize("sql", [
+    "DELETE FROM fact_sales WHERE tran_date >= %(start)s",
+    "SELECT 1; DROP TABLE fact_sales",
+    "SELECT pg_sleep(100)",
+    "SELECT * FROM pg_catalog.pg_tables",
+    "SELECT * FROM fact_sales FOR UPDATE",
+    "",
+])
+def test_template_blocks_the_same_dangerous_sql_as_check_select(sql):
+    with pytest.raises(UnsafeSQLError):
+        check_template(sql, allowed_params=PARAMS)
+
+
+def test_template_literal_percent_must_be_doubled():
+    q = check_template("SELECT 1 FROM dim_item WHERE item_name LIKE 'a%%'", allowed_params=PARAMS)
+    assert "%%" in q.sql
+
+
+def test_template_join_and_cte_tables_detected():
+    q = check_template(
+        "WITH s AS (SELECT store_key FROM fact_sales WHERE tran_date >= %(start)s) "
+        "SELECT d.store_name FROM s JOIN dim_store d ON d.store_key = s.store_key", allowed_params=PARAMS)
+    assert q.tables == frozenset({"dwh.fact_sales", "dwh.dim_store"})

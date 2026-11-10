@@ -1,8 +1,8 @@
-# scripts/check_report_permissions.py
+# tests/check_report_permissions.py
 # Kiểm tra mỗi mục báo cáo (file SQL trong app/agent/queries/) dùng những bảng nào và role manager
 # có được xem các bảng đó theo app/agent/permissions.py không. Chạy từ thư mục gốc dự án:
-#   python scripts/check_report_permissions.py
-#   python scripts/check_report_permissions.py boss        # kiểm tra role khác
+#   python tests/check_report_permissions.py
+#   python tests/check_report_permissions.py boss        # kiểm tra role khác
 # Mục nào báo "BỊ CHẶN" sẽ bị builder bỏ qua khi gửi báo cáo; sửa ROLE_TABLES trong permissions.py
 # (và GRANT SELECT trong sql/create_readonly_role.sql cho khớp) nếu manager cần xem bảng đó.
 
@@ -23,7 +23,7 @@ def main() -> int:
     problems = 0
     for key, section in builder.SECTIONS.items():
         try:
-            tables = sorted(builder._tables_of(builder._load_sql(section.sql_file)))
+            tables = sorted(builder._prepare(section.sql_file).tables)  # v2: qua guard.check_template
         except FileNotFoundError:
             print(f"[THIẾU FILE] {key}: không có {section.sql_file}")
             problems += 1

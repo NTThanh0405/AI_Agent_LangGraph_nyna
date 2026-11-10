@@ -155,7 +155,13 @@ async def _deliver(bot, graph, state_pool, get_data_pool, cfg: ReportConfig, due
             await _give_up(state_pool, uid, user.role, today, f"lỗi {n} lần, lỗi cuối: {e!r}")
         return False
 
-    await mark_sent(state_pool, uid, today)  # ghi ngay sau khi gửi được để không gửi trùng
+    try:
+        await mark_sent(state_pool, uid, today)  # ghi ngay sau khi gửi được để không gửi trùng
+    except Exception:
+        # Báo cáo ĐÃ tới tay người nhận nhưng chưa ghi được vào DB. Nếu để ngoại lệ bay ra ngoài thì
+        # lượt sau (60 giây) vẫn thấy "chưa gửi" và gửi lại mỗi phút. Chặn trong RAM cho hết hôm nay.
+        logger.exception("Đã gửi báo cáo nhưng không ghi được report_state (user_id=%s)", uid)
+        _attempts[uid] = (today, _GAVE_UP)
     logger.info(
         "Đã gửi báo cáo user_id=%s mục=%s lỗi=%s vượt quyền=%s nhận xét=%s",
         uid, built.ok, built.failed, built.denied, built.commentary,
