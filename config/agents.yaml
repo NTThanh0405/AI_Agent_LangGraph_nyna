@@ -6,7 +6,7 @@
 # Tên model: khớp mã API của Anthropic (ví dụ claude-sonnet-5-5, claude-haiku-5-5).
 
 default:
-  temperature: 0
+  temperature: null
   max_tokens: 4096
 
 agents:

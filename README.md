@@ -449,4 +449,4 @@ Còn thiếu hoặc chưa nối:
 
 ## Công nghệ
 
-Python 3.11 · FastAPI · LangGraph · LangChain · Claude (Anthropic) · aiogram · psycopg 3 · sqlglot · PostgreSQL · nginx · Cloudflare Tunnel · Docker
+Python 3.14 · FastAPI · LangGraph · LangChain · Claude (Anthropic) · aiogram · psycopg 3 · sqlglot · PostgreSQL · nginx · Cloudflare Tunnel · Docker
