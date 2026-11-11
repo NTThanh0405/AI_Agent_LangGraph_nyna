@@ -1,0 +1,24 @@
+# config/targets.yaml
+# Mục tiêu kinh doanh do CHỦ DOANH NGHIỆP điền. Agent không được tự đặt hay đoán mục tiêu.
+#   - null (hoặc xoá dòng) = chưa đặt: agent sẽ nói "chưa có mục tiêu".
+#   - Đơn vị: doanh thu và aov tính bằng VND, đã gồm VAT (cùng định nghĩa với glossary.md).
+#   - Mục tiêu viết cho CẢ THÁNG; kỳ ngắn hơn (tuần, ngày...) được chia đều theo ngày.
+#       revenue, orders, new_customers : chia đều theo ngày
+#       aov                            : áp dụng nguyên giá trị (không chia)
+#       customers (số khách khác nhau) : chỉ có mục tiêu khi kỳ là đúng một tháng đầy đủ
+# Tự nạp lại khi file đổi (không cần restart). File sai cú pháp thì giữ bản cũ và ghi log.
+version: 1
+
+defaults:               # áp dụng cho mọi tháng không có override
+  month:
+    revenue: null
+    orders: null
+    aov: null
+    new_customers: null
+    customers: null
+
+overrides: {}           # mục tiêu riêng cho từng tháng (mùa cao điểm, Tết...). Ví dụ:
+#  "2026-12":
+#    revenue: 1500000000
+
+proration: daily_even   # hiện chỉ hỗ trợ chia đều theo ngày

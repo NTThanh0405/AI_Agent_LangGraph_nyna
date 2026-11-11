@@ -1,0 +1,36 @@
+# config/thresholds.yaml
+# Ngưỡng gắn cờ cho business_snapshot, do CHỦ DOANH NGHIỆP điền. Chỉ GẮN CỜ, không tự gửi cảnh báo.
+#   - null = chưa đặt ngưỡng (không gắn cờ chỉ số đó).
+#   - Ngưỡng % viết là số DƯƠNG (độ lớn); hướng do `direction` quyết định:
+#       down = chỉ cờ khi GIẢM | up = chỉ cờ khi TĂNG | both = cờ khi lệch cả hai phía.
+#     Ví dụ warn_pct: 10, direction: down nghĩa là giảm từ 10% trở lên so với kỳ trước thì [CẢNH BÁO].
+#   - critical_pct nên lớn hơn warn_pct (mức [NGHIÊM TRỌNG]).
+# Tự nạp lại khi file đổi (không cần restart). File sai cú pháp thì giữ bản cũ và ghi log.
+version: 1
+
+change_vs_previous:       # % thay đổi so với kỳ liền trước cùng độ dài
+  revenue:
+    warn_pct: null
+    critical_pct: null
+    direction: down
+  orders:
+    warn_pct: null
+    critical_pct: null
+    direction: down
+  aov:
+    warn_pct: null
+    critical_pct: null
+    direction: both
+  new_customers:
+    warn_pct: null
+    critical_pct: null
+    direction: down
+
+achievement_vs_target:    # chỉ dùng khi targets.yaml đã có mục tiêu của chỉ số đó
+  revenue:
+    warn_below_pct: null      # đạt dưới X% mục tiêu (theo tiến độ của kỳ) thì [CẢNH BÁO]
+    critical_below_pct: null  # đạt dưới Y% thì [NGHIÊM TRỌNG]
+
+guards:
+  min_base: {}            # ví dụ {revenue: 1000000}: kỳ trước nhỏ hơn mức này thì không gắn cờ (tránh % nhiễu)
+  skip_partial_periods: false   # true = kỳ chưa đủ ngày (gồm hôm nay) thì không gắn cờ
