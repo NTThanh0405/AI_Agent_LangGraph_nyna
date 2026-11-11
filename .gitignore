@@ -8,3 +8,5 @@ venv/
 data/
 static/
 sql/
+run_local.py
+config/users_seed.yaml
