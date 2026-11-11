@@ -3,15 +3,7 @@
 #
 #   python run_windows.py agent        -> bot Telegram + LangGraph + FastAPI (health) ở 127.0.0.1:8080
 #   python run_windows.py dashboards   -> web phục vụ file dashboard (thay nginx) ở 127.0.0.1:8081
-#
-# Vì sao không gọi thẳng "uvicorn app.main:app"?
-#   Trên Windows, uvicorn mặc định dùng ProactorEventLoop, mà psycopg (driver PostgreSQL bất đồng bộ)
-#   KHÔNG chạy được trên ProactorEventLoop ("Psycopg cannot use the 'ProactorEventLoop'...").
 #   File này ép dùng SelectorEventLoop rồi mới chạy uvicorn.
-#
-# Host/port đọc từ biến môi trường hoặc .env (mặc định chỉ nghe trên 127.0.0.1, không mở ra ngoài):
-#   APP_HOST=127.0.0.1  APP_PORT=8080
-#   DASHBOARD_WEB_HOST=127.0.0.1  DASHBOARD_WEB_PORT=8081
 #
 # Chỉ chạy MỘT tiến trình agent (khoá phiên, rate limit, scheduler báo cáo nằm trong RAM).
 
@@ -61,10 +53,13 @@ def main() -> None:
     )
     server = uvicorn.Server(config)
 
-    if sys.platform == "win32":
-        asyncio.run(server.serve(), loop_factory=asyncio.SelectorEventLoop)
-    else:
-        server.run()
+    try:
+        if sys.platform == "win32":
+            asyncio.run(server.serve(), loop_factory=asyncio.SelectorEventLoop)
+        else:
+            server.run()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
