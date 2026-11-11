@@ -10,6 +10,9 @@
 # Model: mặc định claude-haiku-5-5 (rẻ, nhanh). Muốn đổi, thêm vào .env:
 #   COMMENTARY_MODEL=claude-haiku-5-5
 # Khoá API dùng ANTHROPIC_API_KEY trong .env (cùng khoá với agent chính).
+#
+# KHÔNG truyền temperature/top_p/top_k: các model Claude 5.5 trả lỗi 400 nếu khác mặc định.
+# Muốn nhận xét ổn định thì chỉnh prompt (app/agent/prompts/report_commentary.md), không chỉnh temperature.
 
 import logging
 import os
@@ -25,7 +28,9 @@ PROMPT_PATH = Path(__file__).resolve().parents[1] / "agent" / "prompts" / "repor
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 DEFAULT_MODEL = "claude-haiku-5-5"
 MAX_INPUT_CHARS = 6000   # báo cáo dài hơn thì cắt bớt phần cuối trước khi gửi cho model
-MAX_OUTPUT_TOKENS = 300
+# 2-3 câu chỉ cần ~150 token, nhưng chừa dư: nếu model có suy luận (thinking) thì token suy luận
+# cũng tính vào max_tokens; để 300 dễ bị dùng hết trước khi ra chữ -> nhận xét rỗng.
+MAX_OUTPUT_TOKENS = 1000
 REQUEST_TIMEOUT = 30     # giây; builder.py còn có timeout riêng (mặc định 20 giây) bao ngoài
 
 _FALLBACK_PROMPT = (
@@ -67,17 +72,16 @@ def _system_prompt() -> str:
 @lru_cache(maxsize=1)
 def _model():
     _ensure_env()
-    # temperature=0 để nhận xét ổn định giữa các lần chạy
+    # Không có temperature (xem ghi chú đầu file).
     return ChatAnthropic(
         model=_model_name(),
-        temperature=0,
         max_tokens=MAX_OUTPUT_TOKENS,
         timeout=REQUEST_TIMEOUT,
     )
 
 
 def _as_text(content) -> str:
-    """Nội dung trả về có thể là chuỗi hoặc danh sách khối."""
+    """Nội dung trả về có thể là chuỗi hoặc danh sách khối (chỉ lấy khối chữ, bỏ khối thinking)."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -99,4 +103,9 @@ async def make_commentary(report_text: str) -> str:
         HumanMessage(content=f"Báo cáo:\n\n{body}\n\nViết nhận xét."),
     ]
     reply = await _model().ainvoke(messages)
-    return _as_text(reply.content).strip()
+    text = _as_text(reply.content).strip()
+    if not text:
+        # Rỗng thường do hết max_tokens trước khi ra chữ. Raise để builder.py ghi log,
+        # thay vì lặng lẽ gửi báo cáo không có nhận xét mà không ai biết.
+        raise ValueError("model trả nhận xét rỗng (kiểm tra MAX_OUTPUT_TOKENS / stop_reason)")
+    return text
