@@ -27,7 +27,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field, ValidationError
 
-from app.agent.permissions import PermissionDenied, ensure_access
+from app.agent.permissions import PermissionDenied, ensure_access_user
 from app.agent.tools.dashboard_presets import (
     describe_presets,
     get_preset,
@@ -211,11 +211,11 @@ def _validate(name: str, columns: list[str], rows: list, filters, kpis, charts) 
             raise _ChartError(f"dashboard '{name}': cột ky chỉ được nhận 'nay' hoặc 'truoc', đang có {sorted(map(str, bad))}")
 
 
-async def _build_dataset(conn, name: str, sql: str, role: Optional[str]) -> dict:
+async def _build_dataset(conn, name: str, sql: str, user_id: Optional[str], role: Optional[str]) -> dict:
     """Chạy câu SELECT của một dashboard con và đóng gói dataset cho template."""
     try:
         checked = check_select(sql, MAX_DATASET_ROWS)
-        ensure_access(role, checked.tables)
+        await ensure_access_user(role, user_id, checked.tables)  # staff: tính cả quyền được cấp riêng
     except (UnsafeSQLError, PermissionDenied) as e:
         raise _ChartError(f"dashboard '{name}': câu SQL bị từ chối: {e}")
 
@@ -291,12 +291,12 @@ async def create_dashboard(
         for d, r in zip(dashboards, resolved):
             if len(r["charts"]) > s.dashboard_max_charts:
                 return f"Mỗi dashboard tối đa {s.dashboard_max_charts} biểu đồ, hãy giảm bớt."
-        # Mọi câu SQL của mọi tab đều đi qua check_select + ensure_access theo vai trò
-        # của người tạo, nên file chỉ chứa dữ liệu mà người này được phép xem.
+        # Mọi câu SQL của mọi tab đều đi qua check_select + ensure_access_user theo vai trò
+        # và quyền cấp riêng của người tạo, nên file chỉ chứa dữ liệu mà người này được phép xem.
         async with get_pool().connection() as conn:
             for d, r in zip(dashboards, resolved):
                 name = d.name.strip()[:40] or f"Dashboard {len(built) + 1}"
-                dataset = await _build_dataset(conn, name, d.dataset_sql, role)
+                dataset = await _build_dataset(conn, name, d.dataset_sql, user_id, role)
                 total_rows += len(dataset["rows"])
                 if total_rows > MAX_TOTAL_ROWS:
                     raise _ChartError(

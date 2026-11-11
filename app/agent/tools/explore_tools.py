@@ -12,7 +12,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from psycopg import sql
 
-from app.agent.permissions import can_access, filter_tables
+from app.agent.permissions import can_access_user, filter_tables_user
 from app.agent.tools.sql_tools import _caller, _cell
 from app.config import get_settings
 from app.db.pool import get_pool
@@ -40,17 +40,17 @@ def _is_sensitive(column: str) -> bool:
     return any(part in name for part in SENSITIVE_COLUMN_PARTS)
 
 
-def _resolve(table_name: str, role: Optional[str]) -> Optional[tuple[str, str]]:
+async def _resolve(table_name: str, role: Optional[str], user_id=None) -> Optional[tuple[str, str]]:
     """Tách "schema.table" (mặc định schema db_schema, tức dwh) và kiểm tra quyền.
 
     Trả về (schema, table), hoặc None nếu tên rỗng, thuộc schema hệ thống hoặc
-    vai trò hiện tại không được xem bảng này.
+    người hỏi không được xem bảng này (tính cả quyền cấp riêng cho staff).
     """
     schema, _, table = table_name.strip().lower().rpartition(".")
     schema = schema or get_settings().db_schema
     if not table or schema in _SYSTEM_SCHEMAS or schema.startswith("pg_") or table.startswith("pg_"):
         return None
-    if not can_access(role, f"{schema}.{table}"):
+    if not await can_access_user(role, user_id, f"{schema}.{table}"):
         return None
     return schema, table
 
@@ -71,7 +71,7 @@ async def _fetch_columns(conn, schema: str, table: str) -> list[tuple[str, str, 
 @tool
 async def list_tables(config: RunnableConfig) -> str:
     """Liệt kê các bảng/view mà người dùng hiện tại được phép xem, dạng schema.table."""
-    _, role = _caller(config)
+    user_id, role = _caller(config)
     schema = get_settings().db_schema
     query = (
         "SELECT table_schema, table_name FROM information_schema.tables "
@@ -84,7 +84,7 @@ async def list_tables(config: RunnableConfig) -> str:
         logger.warning("list_tables lỗi: %s", e)
         return "Không đọc được danh sách bảng từ database."
 
-    names = filter_tables(role, (f"{s}.{t}" for s, t in rows))
+    names = await filter_tables_user(role, user_id, (f"{s}.{t}" for s, t in rows))
     return "\n".join(names) if names else "Không có bảng nào bạn được phép xem."
 
 
@@ -95,10 +95,10 @@ async def describe_table(table_name: str, config: RunnableConfig) -> str:
     table_name dạng "dwh.table" hoặc "table" (mặc định schema dwh). Chỉ hiện các cột
     được phép đọc; thông tin cá nhân của khách không nằm trong danh sách.
     """
-    _, role = _caller(config)
+    user_id, role = _caller(config)
     not_found = f"Không tìm thấy bảng '{table_name}' hoặc bạn không có quyền xem."
 
-    target = _resolve(table_name, role)
+    target = await _resolve(table_name, role, user_id)
     if target is None:
         return not_found
     schema, table = target
@@ -133,7 +133,7 @@ async def get_sample_rows(
     user_id, role = _caller(config)
     not_found = f"Không tìm thấy bảng '{table_name}' hoặc bạn không có quyền xem."
 
-    target = _resolve(table_name, role)
+    target = await _resolve(table_name, role, user_id)
     if target is None:
         return not_found
     schema, table = target
