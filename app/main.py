@@ -20,6 +20,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 from app.agent.grants import init_grants
+from app.agent.scopes import load_scopes_config
 from app.agent.graph import build_graph
 from app.agent.models import load_agents_config, recursion_limit
 from app.agent.retention import purge_loop
@@ -75,6 +76,9 @@ async def lifespan(app: FastAPI):
 
     # Cấu hình từng agent (config/agents.yaml): sai thì dừng ngay lúc khởi động, không đợi có người hỏi.
     agents_cfg = load_agents_config()
+    # Khối dữ liệu (config/scopes.yaml): sai thì dừng ngay lúc khởi động
+    scopes_cfg = load_scopes_config()
+    logger.info("Khối dữ liệu: %s", ", ".join(f"{s.name}={s.source}" for s in scopes_cfg.scopes.values()))
     logger.info(
         "Agent: %s | max_handoffs=%d | recursion_limit=%d",
         ", ".join(f"{n}={a.model}" + ("" if a.enabled else " (tắt)") for n, a in agents_cfg.agents.items()),
@@ -99,7 +103,7 @@ async def lifespan(app: FastAPI):
             checkpointer = AsyncPostgresSaver(cp_pool)
             await checkpointer.setup()  # tạo bảng checkpoint nếu chưa có
             await init_users(cp_pool)  # tạo bảng users + chat_sessions; nạp users_seed.yaml nếu trống
-            await init_grants(cp_pool)  # tạo bảng data_grants (quyền xem bảng cấp riêng cho staff)
+            await init_grants(cp_pool)  # tạo bảng scope_grants (khối dữ liệu cấp riêng cho staff)
             await init_audit(cp_pool)  # tạo/bổ sung cột bảng audit_log
             # Bảng report_state + cột chat_sessions.kind (phải chạy SAU init_users vì cần bảng chat_sessions)
             await ensure_report_schema(cp_pool)

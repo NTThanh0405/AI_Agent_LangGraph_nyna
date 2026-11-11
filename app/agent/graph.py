@@ -22,11 +22,15 @@ from app.agent.nodes.coder import make_coder_node
 from app.agent.nodes.designer import make_designer_node
 from app.agent.nodes.supervisor import END_MARK, route_from_supervisor, supervisor_node
 from app.agent.state import AgentState
-from app.agent.tools import TOOLS_BY_AGENT
+from app.agent.scopes import load_scopes_config
+from app.agent.tools import API_TOOL_NAMES, TOOLS_BY_AGENT
 
 
 def _tools_for(agent: str, allowed: Optional[set[str]]) -> list[BaseTool]:
-    return [t for t in TOOLS_BY_AGENT.get(agent, []) if allowed is None or t.name in allowed]
+    # Chưa có khối dữ liệu API nào (hiện chỉ có coffee) thì không gắn tool gọi API: đỡ token, LLM khỏi gọi nhầm
+    skip = set() if load_scopes_config().api_scopes() else API_TOOL_NAMES
+    return [t for t in TOOLS_BY_AGENT.get(agent, [])
+            if (allowed is None or t.name in allowed) and t.name not in skip]
 
 
 def build_graph(tools: Optional[Sequence[BaseTool]] = None, checkpointer: Optional[BaseCheckpointSaver] = None):

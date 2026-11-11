@@ -69,8 +69,8 @@ Telegram (boss / manager / staff)
 | `/myid` | **Mọi người, kể cả người lạ** | Xem Telegram ID để gửi cho admin |
 | `/new` | Mọi người dùng | Bắt đầu cuộc trò chuyện mới |
 | `/sessions` | Mọi người dùng | Xem, chuyển hoặc xoá các cuộc trò chuyện |
-| `/tuan`, `/thang` | boss, manager | Tình hình kinh doanh tuần này / tháng này |
-| `/dashboard` | boss, manager | Dashboard doanh thu tuần này |
+| `/tuan`, `/thang` | Mọi người dùng | Tình hình kinh doanh tuần này / tháng này |
+| `/dashboard` | Mọi người dùng | Dashboard doanh thu tuần này |
 | `/quyen` | Mọi người dùng | Xem bạn được xem những dữ liệu nào |
 
 Staff không dùng được `/tuan`, `/thang`, `/dashboard`; staff hỏi trực tiếp về các bảng mình được cấp.
@@ -129,8 +129,6 @@ Người ngoài bảng `users` bị bỏ qua im lặng (chỉ ghi log), riêng `
 - Trạng thái đã gửi lưu trong `agent_state.report_state`, nên restart giữa chừng vẫn gửi bù và không gửi trùng trong ngày. Bật lại muộn hơn `max_delay_minutes` thì bỏ qua báo cáo hôm đó.
 - Mục nào vượt quyền của manager bị bỏ khỏi báo cáo; một mục lỗi vẫn gửi phần còn lại.
 - Lỗi liên tục thì bỏ cuộc sau 5 lần trong ngày.
-
-> ⚠️ Thư mục `app/agent/queries/` hiện **chưa có trong repo**. Cần tự viết các file `*.sql` theo schema thật trước khi báo cáo sáng chạy được.
 
 ---
 

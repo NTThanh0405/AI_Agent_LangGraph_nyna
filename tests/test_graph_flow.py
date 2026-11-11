@@ -84,7 +84,7 @@ async def test_data_question_runs_analyst_coder_chat(llms):
     # messages chỉ có hội thoại thật: không lẫn tool_use/tool_result
     assert [type(m).__name__ for m in out["messages"]] == ["HumanMessage", "AIMessage"]
     assert out["brief"]["period_start"] and out["brief"]["period_start"] == out["brief"]["period_end"]  # "hôm qua" -> 1 ngày
-    assert f["coder"].bound == ["list_tables", "describe_table", "run_select_query"]
+    assert f["coder"].bound == ["list_tables", "describe_table", "run_select_query"]  # chưa có khối API
     assert any(isinstance(m, ToolMessage) for m in out["coder_messages"])
     sys_prompt = C.extract_text(f["supervisor"].calls[0][0].content)
     assert "revenue=1000000" in sys_prompt  # câu trả lời cuối thấy số liệu gốc từ tool
@@ -100,7 +100,7 @@ async def test_dashboard_goes_through_designer_and_link_reaches_chat(llms):
         supervisor=[AIMessage(content="Dashboard: https://dashboard.nynahouse.com/d/abc")],
     )
     out = await run(build_graph(ALL_TOOLS), "tạo dashboard doanh thu")
-    assert f["designer"].bound == ["list_tables", "describe_table", "create_dashboard"]
+    assert f["designer"].bound == ["list_tables", "describe_table", "list_dashboard_presets", "create_dashboard"]
     assert "https://dashboard.nynahouse.com/d/abc" in C.extract_text(f["supervisor"].calls[0][0].content)
     assert out["designer_done"] and out["coder_done"]
 
@@ -190,3 +190,12 @@ async def test_agents_receive_business_knowledge_and_cache_marker(llms):
     chat_sys = C.extract_text(f["supervisor"].calls[0][0].content)
     assert "Ngày Phụ nữ Việt Nam" in chat_sys                                            # calendar.yaml theo kỳ trong brief
     assert "Chưa rõ" not in chat_sys and "[ĐIỀN" not in chat_sys
+
+
+@pytest.mark.asyncio
+async def test_coder_gets_api_tools_only_when_api_scopes_exist(llms, api_scopes_config):
+    f = llms(analyst=[AnalystOutput(question="x", intent="lookup")], coder=[AIMessage(content="n")],
+             designer=[], supervisor=[AIMessage(content="ok")])
+    await run(build_graph(ALL_TOOLS), "doanh thu house tuần này")
+    assert f["coder"].bound == ["list_tables", "describe_table", "run_select_query",
+                                "list_business_apis", "call_business_api"]

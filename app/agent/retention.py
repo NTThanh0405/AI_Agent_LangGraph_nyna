@@ -1,6 +1,6 @@
 # app/agent/retention.py
 # Dọn dữ liệu cũ mỗi giờ: phiên hết hạn (+ checkpoint mồ côi), quyền xem bảng đã hết hạn
-# của staff (data_grants) và audit_log quá hạn.
+# của staff (scope_grants) và audit_log quá hạn.
 # Số ngày giữ nhật ký lấy từ app/config.py (audit_retention_days).
 
 import asyncio
@@ -47,7 +47,7 @@ async def purge_loop(pool, graph) -> None:
         try:
             n = await grants.purge_expired()
             if n:
-                logger.info("Đã xoá %d quyền xem bảng hết hạn", n)
+                logger.info("Đã xoá %d quyền khối dữ liệu hết hạn", n)
         except asyncio.CancelledError:
             raise
         except Exception:

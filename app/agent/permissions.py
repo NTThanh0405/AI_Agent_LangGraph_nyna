@@ -1,19 +1,21 @@
 # app/agent/permissions.py
 # Phân quyền xem dữ liệu theo vai trò (user_role): mỗi vai trò được xem những bảng nào.
 # Vai trò lạ hoặc để trống bị từ chối hoàn toàn, kể cả câu SELECT không đụng bảng nào.
-# Riêng vai trò staff: mặc định không xem bảng nào, chỉ xem phần boss/manager cấp riêng
-# (bảng agent_state.data_grants, xem app/agent/grants.py).
+# Riêng vai trò staff: mặc định không xem bảng nào, chỉ xem bảng của các KHỐI dữ liệu được cấp
+# (khối source=postgres trong config/scopes.yaml, ví dụ coffee -> dwh.*; quyền cấp lưu ở
+# agent_state.scope_grants, xem app/agent/grants.py và app/agent/scopes.py).
+# Khối source=api (house, misa) không có bảng; quyền gọi API do app/agent/tools/api_tools.py kiểm tra.
 # PostgreSQL chỉ có một role chỉ-đọc dùng chung (agent_readonly) và che cột cá nhân của
 # khách (sql/create_readonly_role.sql).
 #
 # Hai nhóm hàm:
 #   - can_access / filter_tables / ensure_access: đồng bộ, CHỈ theo role (staff luôn bị chặn).
-#   - can_access_user / filter_tables_user / ensure_access_user: async, có tính quyền cấp
+#   - can_access_user / filter_tables_user / ensure_access_user: async, có tính khối được cấp
 #     riêng cho staff. Bắt buộc dùng await.
 
 from typing import Iterable, Optional
 
-from app.agent import grants
+from app.agent import scopes
 
 STAFF_ROLE = "staff"
 
@@ -23,7 +25,7 @@ STAFF_ROLE = "staff"
 ROLE_TABLES: dict[str, set[str]] = {
     "boss": {"dwh.*"},
     "manager": {"dwh.*"},
-    "staff": set(),  # nhân viên: chỉ xem phần được cấp
+    "staff": set(),  # nhân viên: chỉ xem bảng của khối được cấp (config/scopes.yaml)
 }
 
 
@@ -68,11 +70,13 @@ def ensure_access(role: Optional[str], tables: Iterable[str]) -> None:
 # ---------------------------------------------------------------- có tính quyền cấp riêng (async)
 
 async def _patterns(role: Optional[str], user_id) -> set[str]:
-    """Tập quyền thực tế: quyền theo role, cộng quyền được cấp riêng nếu là staff."""
+    """Tập bảng thực tế: bảng theo role, cộng bảng của các khối postgres được cấp nếu là staff.
+    Khối api (house, misa) không thêm bảng nào."""
     role_l = (role or "").lower()
     patterns = set(ROLE_TABLES.get(role_l, set()))
     if role_l == STAFF_ROLE and user_id:
-        patterns |= await grants.get_grants(str(user_id))
+        granted = await scopes.user_scopes(role_l, user_id)
+        patterns |= scopes.load_scopes_config().tables_for(granted)
     return patterns
 
 

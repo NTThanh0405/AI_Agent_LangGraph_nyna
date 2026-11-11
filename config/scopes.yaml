@@ -1,0 +1,98 @@
+# config/scopes.yaml
+# Phân quyền theo KHỐI dữ liệu (thay cho cấp quyền từng bảng).
+# Nạp khi service khởi động (sửa xong cần restart agent). Đổi đường dẫn bằng biến môi trường SCOPES_CONFIG.
+#
+# Mỗi khối (scope) có một nguồn:
+#   source: postgres -> dữ liệu nằm trong database kinh doanh; `tables` là các bảng được xem
+#                       ("dwh.*" = mọi bảng trong schema dwh). Đi qua guard.py + permissions.py như cũ.
+#   source: api      -> dữ liệu lấy qua HTTP API; `connector` trỏ tới mục trong `connectors` bên dưới.
+#                       Agent chỉ gọi được đúng các endpoint khai báo ở đây (không gọi URL tuỳ ý).
+#
+# Ai được khối nào:
+#   role_scopes: quyền mặc định theo role ("*" = mọi khối đang khai báo). boss/manager xem tất cả.
+#   staff: không có khối nào mặc định; boss/manager cấp trên Telegram:
+#          /capquyen <telegram_id> <khối> [số giờ]   /thuhoi <telegram_id> <khối|all>   /quyen <telegram_id>
+#   Có khối nào mới xem được dữ liệu khối đó (vd cấp misa mới xem được dữ liệu kế toán từ API MISA).
+#
+# HIỆN TẠI chỉ có khối coffee (dữ liệu iPOS trong database). House, MISA, Base chưa có dữ liệu/API:
+# mẫu để sẵn ở cuối file (đang là chú thích). Khi có API thì bỏ dấu # ở khối + connector tương ứng,
+# sửa path/params theo tài liệu API thật, đặt URL + token trong .env, rồi restart agent.
+# Khi chưa có khối API nào, agent không được gắn tool gọi API (không tốn token).
+
+scopes:
+  coffee:
+    title: "Nyna Coffee (iPOS)"
+    source: postgres
+    tables: ["dwh.*"]
+
+  # house:
+  #   title: "Nyna House"
+  #   source: api
+  #   connector: house
+  #
+  # misa:
+  #   title: "Kế toán MISA"
+  #   source: api
+  #   connector: misa
+  #
+  # base:
+  #   title: "Base"
+  #   source: api
+  #   connector: base
+
+role_scopes:
+  boss: ["*"]
+  manager: ["*"]
+  staff: []
+
+# ------------------------------------------------------------------ kết nối API (mẫu, chưa dùng)
+# Bí mật (URL, token) KHÔNG ghi ở đây mà đặt trong .env, file này chỉ ghi TÊN biến môi trường.
+#   base_url_env : biến chứa địa chỉ gốc, ví dụ HOUSE_API_BASE_URL=https://api.house.example.com
+#   auth.type    : header (token trong header) | query (token trong tham số URL, khai báo `param`) | none
+#   timeout_seconds, max_days: thời gian chờ mỗi lần gọi; khoảng ngày dài nhất cho một lần gọi
+#   endpoints    : danh sách endpoint agent được gọi. Mỗi endpoint:
+#       description : mô tả cho agent biết endpoint trả gì (agent dựa vào đây để chọn)
+#       method      : GET (mặc định) hoặc POST
+#       path        : đường dẫn sau base_url
+#       params      : tham số gửi đi; {start} {end} (YYYY-MM-DD) và {start_dmy} {end_dmy} (DD/MM/YYYY)
+#                     được thay bằng khoảng ngày agent truyền vào. POST thì params gửi dạng JSON body.
+#       result_path : (tuỳ chọn) đường dẫn tới phần dữ liệu trong JSON trả về, ví dụ "data.items"
+# Connector chưa có URL trong .env thì agent được báo "chưa cấu hình", không gọi đi đâu cả.
+
+connectors: {}
+# connectors:
+#   house:
+#     base_url_env: HOUSE_API_BASE_URL
+#     auth: {type: header, header: Authorization, value_env: HOUSE_API_TOKEN, prefix: "Bearer "}
+#     timeout_seconds: 20
+#     max_days: 366
+#     endpoints:
+#       revenue_by_day:
+#         description: "Doanh thu Nyna House theo từng ngày (số tiền, số booking)"
+#         method: GET
+#         path: "/api/reports/revenue-by-day"      # MẪU - sửa theo API thật
+#         params: {from: "{start}", to: "{end}"}
+#
+#   misa:
+#     base_url_env: MISA_API_BASE_URL
+#     auth: {type: header, header: Authorization, value_env: MISA_API_TOKEN, prefix: "Bearer "}
+#     timeout_seconds: 30
+#     max_days: 366
+#     endpoints:
+#       revenue_summary:
+#         description: "Tổng hợp doanh thu kế toán (đã ghi sổ trên MISA) trong khoảng ngày"
+#         method: POST
+#         path: "/api/report/revenue-summary"      # MẪU - sửa theo API thật của MISA
+#         params: {from_date: "{start}", to_date: "{end}"}
+#
+#   base:
+#     base_url_env: BASE_API_BASE_URL
+#     auth: {type: query, param: access_token, value_env: BASE_API_TOKEN}
+#     timeout_seconds: 20
+#     max_days: 366
+#     endpoints:
+#       summary:
+#         description: "MẪU - mô tả dữ liệu Base trả về"
+#         method: POST
+#         path: "/api/report/summary"             # MẪU - sửa theo API thật của Base
+#         params: {from: "{start_dmy}", to: "{end_dmy}"}

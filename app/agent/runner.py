@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 
 from app.agent.models import recursion_limit
+from app.agent.scopes import user_scopes
 from app.agent.sessions import get_lock, get_or_create_active, reset, touch_session
 from app.agent.state import new_turn_state
 from app.config import get_settings
@@ -85,11 +86,18 @@ async def run_turn(graph, pool, *, user_id: str, role: str, message: str) -> Tur
         return TurnResult(MSG_BUSY, ok=False, busy=True, thread=thread)
 
     # role do server tra từ bảng users (app/telegram/auth.py), không lấy từ nội dung tin nhắn.
+    # Khối dữ liệu (coffee/house/misa) chỉ để báo cho LLM biết nên lấy nguồn nào; tool vẫn tự kiểm tra lại quyền.
+    try:
+        allowed_scopes = sorted(await user_scopes(role, user_id))
+    except Exception:
+        logger.exception("Không tra được khối dữ liệu (user_id=%s)", user_id)
+        allowed_scopes = []
     config = {
         "configurable": {
             "thread_id": thread,
             "user_id": user_id,
             "user_role": role,
+            "user_scopes": allowed_scopes,
         },
         "recursion_limit": recursion_limit(),  # theo config/agents.yaml (graph v2 nhiều node hơn v1)
     }
