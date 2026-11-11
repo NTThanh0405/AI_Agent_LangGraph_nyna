@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  deploy/windows/winsw/NynaDashboards.xml
+  Cấu hình WinSW (v2.12) cho web phục vụ dashboard (thay container nginx "dashboards-web").
+  Nghe 127.0.0.1:8081; Cloudflare Tunnel trỏ hostname dashboard vào http://localhost:8081.
+  %BASE% = thư mục chứa NynaDashboards.exe, tức <dự án>\deploy\windows\winsw
+-->
+<service>
+  <id>NynaDashboards</id>
+  <name>Nyna Dashboards Web</name>
+  <description>Nyna AI agent: web phuc vu file dashboard (thay nginx)</description>
+
+  <executable>%BASE%\..\..\..\.venv\Scripts\python.exe</executable>
+  <arguments>run_windows.py dashboards</arguments>
+  <workingdirectory>%BASE%\..\..\..</workingdirectory>
+
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+
+  <serviceaccount>
+    <domain>NT AUTHORITY</domain>
+    <user>LocalService</user>
+  </serviceaccount>
+
+  <env name="PYTHONUTF8" value="1"/>
+  <env name="PYTHONUNBUFFERED" value="1"/>
+  <env name="PYTHONDONTWRITEBYTECODE" value="1"/>
+
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <stopparentprocessfirst>true</stopparentprocessfirst>
+  <stoptimeout>10 sec</stoptimeout>
+
+  <logpath>%BASE%\..\..\..\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>4</keepFiles>
+  </log>
+</service>

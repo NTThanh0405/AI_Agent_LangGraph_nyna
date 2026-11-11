@@ -140,7 +140,7 @@ Các thư mục `sql/`, `static/`, `data/` nằm trong `.gitignore` nên **khôn
 
 ## Yêu cầu
 
-- Docker và Docker Compose
+- **Một trong hai cách chạy:** Docker + Docker Compose (Linux), **hoặc** chạy trực tiếp trên **Windows Server 2022** không cần Docker (Python 3.14 + WinSW, xem mục *Chạy trên Windows Server (không Docker)*)
 - PostgreSQL (trên máy host hoặc máy khác) gồm database kinh doanh (schema `dwh`) và database `agent_app` (schema `agent_state`)
 - Telegram Bot Token (tạo qua [@BotFather](https://t.me/BotFather))
 - Anthropic API key
@@ -222,6 +222,96 @@ Kiểm tra: nhắn `/start` cho bot từ tài khoản có trong bảng `users`.
 
 ---
 
+## Chạy trên Windows Server (không Docker)
+
+Windows Server 2022 không chạy được Docker nên mỗi container được thay bằng một thứ chạy trực tiếp:
+
+| Docker (cũ) | Windows Server | Ghi chú |
+|---|---|---|
+| container `agent` | service **NynaAgent**: `python run_windows.py agent` | nghe `127.0.0.1:8080`, không mở ra ngoài |
+| container `dashboards-web` (nginx) | service **NynaDashboards**: `python run_windows.py dashboards` (`app/dashboard_web.py`) | nghe `127.0.0.1:8081`, giữ nguyên luật của `nginx-dash.conf` |
+| container `cloudflared` | service **Cloudflared** (bản cài Windows chính thức) | trỏ hostname tới `http://localhost:8081` |
+| `restart: unless-stopped` | WinSW tự khởi động lại sau 10 giây (`<onfailure>`) | cấu hình trong `deploy/windows/winsw/*.xml` |
+| `HEALTHCHECK` | `deploy/windows/healthcheck.ps1` chạy bằng Task Scheduler mỗi 5 phút | khởi động lại khi bị treo |
+| volume `dashboards` | thư mục `data\dashboards` | |
+
+> Phải chạy bằng `run_windows.py`, **không** gọi thẳng `uvicorn app.main:app`: trên Windows uvicorn dùng `ProactorEventLoop`, psycopg async không chạy được trên loop này. `run_windows.py` ép dùng `SelectorEventLoop`.
+
+### 1. Cài phần mềm (PowerShell Admin)
+
+- **Python 3.14** bản 64-bit, chọn *Install for all users* (để tài khoản service đọc được), tick *Add to PATH*.
+- **Git** (để `git pull` cập nhật code).
+- **WinSW** bản 2.12 (`WinSW-x64.exe` trên trang release GitHub của WinSW), để ví dụ ở `C:\tools\WinSW-x64.exe`. Script cài sẽ tự copy thành `NynaAgent.exe`, `NynaDashboards.exe` cạnh file XML.
+- **cloudflared** bản Windows (file `.msi` trên trang release GitHub của Cloudflare).
+- PostgreSQL: nếu chạy cùng máy thì đặt `DB_HOST=localhost`; nếu ở máy khác thì mở `pg_hba.conf` cho IP máy này.
+
+### 2. Lấy code và tạo môi trường
+
+```powershell
+cd C:\
+git clone https://github.com/NTThanh0405/AI_Agent_LangGraph_nyna.git nyna
+cd C:\nyna
+py -3.14 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+mkdir static, data\dashboards, logs -Force
+# đặt chart.umd.min.js (bản đã ghim phiên bản) vào C:\nyna\static\
+notepad .env
+```
+
+Khác biệt `.env` so với Docker: `DB_HOST=localhost` (bỏ `host.docker.internal`), `CHECKPOINT_DATABASE_URL` cũng trỏ `localhost`, `DASHBOARD_DIR=data/dashboards`, không cần `CLOUDFLARE_TUNNEL_TOKEN`. Lưu `.env` dạng UTF-8.
+
+### 3. Chạy thử bằng tay
+
+```powershell
+.venv\Scripts\python.exe run_windows.py agent        # cửa sổ 1, Ctrl+C để dừng
+.venv\Scripts\python.exe run_windows.py dashboards   # cửa sổ 2
+Invoke-RestMethod http://127.0.0.1:8080/api/v1/health
+```
+
+Nhắn `/start` cho bot. Chạy ổn rồi mới cài service.
+
+### 4. Cài thành Windows Service (chạy 24/7, tự bật khi khởi động máy)
+
+```powershell
+cd C:\nyna
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-services.ps1 -WinSW C:\tools\WinSW-x64.exe
+```
+
+Mỗi service được cấu hình trong `deploy\windows\winsw\NynaAgent.xml` và `NynaDashboards.xml`: khởi động tự động (delayed), chạy bằng tài khoản `LocalService` (không phải Administrator), tự khởi động lại khi chết, log ở `logs\NynaAgent.out.log` / `.err.log` (xoay vòng khi > 10 MB). Nếu PostgreSQL chạy cùng máy, bỏ comment dòng `<depend>` trong `NynaAgent.xml` và sửa tên service (xem bằng `Get-Service postgres*`) trước khi chạy script.
+
+### 5. Cloudflare Tunnel
+
+```powershell
+cloudflared.exe service install <TUNNEL_TOKEN>
+```
+
+Trong Cloudflare Zero Trust → Networks → Tunnels → Public Hostname, đổi service của hostname dashboard thành `HTTP` → `localhost:8081` (trước là `dashboards-web:80`). Hostname phải khớp `DASHBOARD_BASE_URL`.
+
+### 6. Tự kiểm tra sức khoẻ (thay Docker HEALTHCHECK)
+
+```powershell
+$a = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"C:\nyna\deploy\windows\healthcheck.ps1`""
+$t = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
+Register-ScheduledTask -TaskName "NynaAgentHealth" -Action $a -Trigger $t -User "SYSTEM" -RunLevel Highest
+```
+
+### Vận hành hằng ngày
+
+| Việc | Lệnh |
+|---|---|
+| Xem trạng thái | `Get-Service Nyna*, Cloudflared` |
+| Xem log trực tiếp | `Get-Content C:\nyna\logs\NynaAgent.err.log -Wait -Tail 50` (log của app ghi ra stderr) |
+| Khởi động lại sau khi sửa `.env` | `Restart-Service NynaAgent` |
+| Cập nhật code | `git pull` → `.venv\Scripts\python.exe -m pip install -r requirements.txt` → `Restart-Service NynaAgent, NynaDashboards` |
+| Sửa `config/reports.yaml` | không cần restart (tự nạp lại trong 1 phút) |
+| Sửa cấu hình service (XML) | sửa `deploy\windows\winsw\NynaAgent.xml` → chạy lại `install-services.ps1` |
+| Gỡ service | `deploy\windows\uninstall-services.ps1` |
+
+Lưu ý: không mở port 8080/8081 trên Windows Firewall; Cloudflare Tunnel kết nối ra ngoài nên không cần port vào. Tắt chế độ ngủ/hibernate của máy chủ và đặt Windows Update khởi động lại ngoài giờ báo cáo sáng.
+
+---
+
 ## Biến môi trường
 
 ```env
@@ -237,7 +327,7 @@ INVOKE_TIMEOUT_SECONDS=120          # tổng thời gian tối đa mỗi lượt
 TELEGRAM_BOT_TOKEN=                 # bắt buộc
 
 # PostgreSQL kinh doanh (một role chỉ-đọc dùng chung)
-DB_HOST=host.docker.internal
+DB_HOST=host.docker.internal        # Docker; Windows chạy trực tiếp: localhost
 DB_PORT=5432
 DB_NAME=NynaGroup
 DB_USER=agent_readonly
@@ -268,7 +358,12 @@ REPORTS_CONFIG=                     # tuỳ chọn: đường dẫn khác cho re
 # Dashboard (gửi bằng link qua nginx + Cloudflare)
 DELIVERY_MODE=link
 DASHBOARD_BASE_URL=https://dashboard.example.com
-DASHBOARD_DIR=/data/dashboards
+DASHBOARD_DIR=/data/dashboards        # Docker; Windows: data/dashboards
+DASHBOARD_STATIC_DIR=static          # chỉ dùng khi chạy không Docker (app/dashboard_web.py)
+APP_HOST=127.0.0.1                   # chỉ dùng khi chạy bằng run_windows.py
+APP_PORT=8080
+DASHBOARD_WEB_HOST=127.0.0.1
+DASHBOARD_WEB_PORT=8081
 DASHBOARD_TTL_HOURS=24
 DASHBOARD_MAX_CHARTS=6
 CLOUDFLARE_TUNNEL_TOKEN=
@@ -392,4 +487,4 @@ Còn thiếu hoặc chưa nối:
 
 ## Công nghệ
 
-Python 3.14 · FastAPI · LangGraph · LangChain · Claude (Anthropic) · aiogram · psycopg 3 · sqlglot · PostgreSQL · nginx · Cloudflare Tunnel · Docker
+Python 3.14 · FastAPI · LangGraph · LangChain · Claude (Anthropic) · aiogram · psycopg 3 · sqlglot · PostgreSQL · nginx · Cloudflare Tunnel · Docker hoặc Windows Service (WinSW)

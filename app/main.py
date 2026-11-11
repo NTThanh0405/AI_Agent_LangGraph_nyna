@@ -3,13 +3,14 @@
 # kinh doanh) và pool ghi cho database agent_app (người dùng, phiên, hội thoại, audit), tạo bảng
 # người dùng/phiên/audit, nạp cấu hình agent (config/agents.yaml) và owner đầu tiên nếu bảng còn trống, dựng checkpointer
 # PostgresSaver, compile graph một lần và chạy các tác vụ nền (bot Telegram, dọn dashboard hết
-# hạn, dọn phiên/audit cũ, gửi báo cáo sáng cho manager). FastAPI chỉ còn phục vụ health check cho Docker HEALTHCHECK.
+# hạn, dọn phiên/audit cũ, gửi báo cáo sáng cho manager). FastAPI chỉ còn phục vụ health check (Docker HEALTHCHECK hoặc script kiểm tra trên Windows).
 # Khi tắt thì dừng các tác vụ nền và đóng pool.
 
 import asyncio
 import logging
 import os
 import signal
+import sys
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from aiogram import Bot
@@ -48,15 +49,19 @@ def _bot_token() -> str:
 
 
 def _on_bot_done(task: asyncio.Task) -> None:
-    """Bot dừng vì lỗi (ví dụ token sai) thì tắt cả dịch vụ để Docker khởi động lại,
-    thay vì để container vẫn "healthy" trong khi bot đã chết."""
+    """Bot dừng vì lỗi (ví dụ token sai) thì tắt cả dịch vụ để trình quản lý dịch vụ
+    (Docker hoặc NSSM trên Windows) khởi động lại, thay vì để tiến trình vẫn sống trong khi bot đã chết."""
     if task.cancelled():
         return
     exc = task.exception()
     if exc is not None:
         logger.critical(
-            "Bot Telegram dừng do lỗi, tắt dịch vụ để Docker khởi động lại", exc_info=exc
+            "Bot Telegram dừng do lỗi, tắt dịch vụ để được khởi động lại", exc_info=exc
         )
+        if sys.platform == "win32":
+            # Windows không có SIGTERM thật (os.kill chỉ là TerminateProcess). Thoát mã 1 để NSSM khởi động lại.
+            logging.shutdown()
+            os._exit(1)
         os.kill(os.getpid(), signal.SIGTERM)
 
 

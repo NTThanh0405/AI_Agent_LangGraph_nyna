@@ -1,4 +1,5 @@
 # docker-compose.yml
+# (Chỉ dùng khi máy chủ có Docker. Windows Server 2022 không Docker: xem deploy/windows/ và README.)
 # Chạy cả hệ thống bằng một lệnh: docker compose up -d --build
 #   agent          : service LangGraph (bot Telegram long polling + FastAPI). KHÔNG mở port ra ngoài.
 #                    Bot chủ động hỏi Telegram nên không cần webhook/URL công khai.
@@ -22,6 +23,7 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Ho_Chi_Minh
+      - DASHBOARD_DIR=/data/dashboards
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

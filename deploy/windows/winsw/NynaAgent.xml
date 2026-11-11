@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  deploy/windows/winsw/NynaAgent.xml
+  Cấu hình WinSW (v2.12) cho service bot Telegram + LangGraph (thay container "agent").
+  WinSW tìm file XML trùng tên với file exe: NynaAgent.exe + NynaAgent.xml cùng thư mục này.
+  %BASE% = thư mục chứa NynaAgent.exe, tức <dự án>\deploy\windows\winsw
+  Sau khi sửa file này: NynaAgent.exe refresh (hoặc uninstall + install) rồi Restart-Service NynaAgent.
+-->
+<service>
+  <id>NynaAgent</id>
+  <name>Nyna AI Agent (LangGraph + Telegram)</name>
+  <description>Nyna AI agent: Telegram bot + LangGraph + bao cao sang (khong dung n8n)</description>
+
+  <executable>%BASE%\..\..\..\.venv\Scripts\python.exe</executable>
+  <!-- Bắt buộc chạy qua run_windows.py: ép SelectorEventLoop cho psycopg -->
+  <arguments>run_windows.py agent</arguments>
+  <workingdirectory>%BASE%\..\..\..</workingdirectory>
+
+  <!-- Tự bật khi khởi động máy, trễ một chút để mạng và PostgreSQL lên trước -->
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <!-- PostgreSQL chạy CÙNG máy: bỏ comment và sửa tên service (xem bằng Get-Service postgres*) -->
+  <!-- <depend>postgresql-x64-17</depend> -->
+
+  <!-- Chạy bằng tài khoản ít quyền, không phải Administrator/LocalSystem -->
+  <serviceaccount>
+    <domain>NT AUTHORITY</domain>
+    <user>LocalService</user>
+  </serviceaccount>
+
+  <env name="PYTHONUTF8" value="1"/>
+  <env name="PYTHONUNBUFFERED" value="1"/>
+  <env name="PYTHONDONTWRITEBYTECODE" value="1"/>
+  <env name="MPLCONFIGDIR" value="%BASE%\..\..\..\data\mpl"/>
+
+  <!-- Tiến trình thoát mã khác 0 (bot lỗi, crash) thì khởi động lại sau 10 giây; thay restart: unless-stopped -->
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <!-- Tắt êm: gửi Ctrl+C cho python, chờ tối đa 20 giây để đóng pool DB và dừng bot -->
+  <stopparentprocessfirst>true</stopparentprocessfirst>
+  <stoptimeout>20 sec</stoptimeout>
+
+  <!-- Log: logs\NynaAgent.out.log / .err.log, xoay vòng khi > 10 MB, giữ 8 file -->
+  <logpath>%BASE%\..\..\..\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+</service>

@@ -66,7 +66,9 @@ class Settings(BaseSettings):
     # "file": bot gửi file HTML qua Telegram. "link": ghi file vào dashboard_dir,
     # nginx phục vụ và bot gửi link (cần dashboard_base_url).
     delivery_mode: Literal["file", "link"] = "file"
-    dashboard_dir: str = "/data/dashboards"
+    # Đường dẫn tương đối tính từ thư mục dự án (run_windows.py chdir về đó).
+    # Docker đặt DASHBOARD_DIR=/data/dashboards; Windows có thể để mặc định hoặc ghi đường dẫn tuyệt đối.
+    dashboard_dir: str = "data/dashboards"
     dashboard_base_url: str = ""
     dashboard_ttl_hours: int = 24
     dashboard_max_charts: int = 6
