@@ -3,8 +3,6 @@
 # lưu trong agent_app, bảng agent_state.scope_grants. Boss/manager cấp/thu hồi bằng /capquyen, /thuhoi
 # (app/telegram/handlers.py); permissions.py và api_tools.py đọc từ đây, có hiệu lực ngay, không cần restart.
 # Lỗi database khi ĐỌC quyền thì trả về tập rỗng (không có quyền) để luôn an toàn.
-#
-# Bảng cũ agent_state.data_grants (cấp theo từng bảng) không còn được đọc; có thể xoá tay khi không cần.
 
 import logging
 from typing import Optional
