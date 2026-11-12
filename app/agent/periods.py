@@ -314,6 +314,12 @@ def resolve_period(text: str, today: Optional[date] = None) -> Period:
         raise PeriodError("Chưa có cụm thời gian nào để đổi.")
     today = today or today_local()
     t = _normalize(text)
+    if re.search(r"\bcung ky\b", t):
+        # "cùng kỳ năm ngoái/tháng trước" phụ thuộc kỳ đang so; không đoán (trước đây bị hiểu thành CẢ năm ngoái)
+        raise PeriodError(
+            f"'{text}' phụ thuộc kỳ đang so sánh nên không tự đổi được. Hãy truyền khoảng ngày cụ thể, "
+            "ví dụ kỳ 02/11/2026–08/11/2026 thì cùng kỳ năm ngoái là 'từ 02/11/2025 đến 08/11/2025'."
+        )
     period = (
         _try_last_n(t, today)
         or _try_dates(t, today)

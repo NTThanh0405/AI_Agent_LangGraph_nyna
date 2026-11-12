@@ -20,10 +20,20 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(
-    os.environ.get("REPORTS_CONFIG")
-    or Path(__file__).resolve().parents[2] / "config" / "reports.yaml"
-)
+_CONFIG_DIR = Path(__file__).resolve().parents[2] / "config"
+
+
+def _default_config_path() -> Path:
+    """Thứ tự ưu tiên: biến môi trường REPORTS_CONFIG > config/reports.local.yaml (bản thật trên máy chủ,
+    có Telegram ID, nằm trong .gitignore) > config/reports.yaml (bản mẫu trong git, managers: {})."""
+    env = os.environ.get("REPORTS_CONFIG")
+    if env:
+        return Path(env)
+    local = _CONFIG_DIR / "reports.local.yaml"
+    return local if local.is_file() else _CONFIG_DIR / "reports.yaml"
+
+
+CONFIG_PATH = _default_config_path()
 
 
 REPORT_ROLE = "manager"  # chỉ role này nhận báo cáo tự động và được dùng /reply, /baocao*

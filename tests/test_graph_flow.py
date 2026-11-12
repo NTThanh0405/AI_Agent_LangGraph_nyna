@@ -84,7 +84,10 @@ async def test_data_question_runs_analyst_coder_chat(llms):
     # messages chỉ có hội thoại thật: không lẫn tool_use/tool_result
     assert [type(m).__name__ for m in out["messages"]] == ["HumanMessage", "AIMessage"]
     assert out["brief"]["period_start"] and out["brief"]["period_start"] == out["brief"]["period_end"]  # "hôm qua" -> 1 ngày
-    assert f["coder"].bound == ["list_tables", "describe_table", "run_select_query"]  # chưa có khối API
+    from app.agent.tools import API_TOOL_NAMES, TOOLS_BY_AGENT
+    # chưa có khối API: coder nhận đúng tool khai báo trong TOOLS_BY_AGENT, không có tool gọi API
+    assert f["coder"].bound == [t.name for t in TOOLS_BY_AGENT["coder"] if t.name not in API_TOOL_NAMES]
+    assert {"run_select_query", "business_snapshot", "explain_change"} <= set(f["coder"].bound)
     assert any(isinstance(m, ToolMessage) for m in out["coder_messages"])
     sys_prompt = C.extract_text(f["supervisor"].calls[0][0].content)
     assert "revenue=1000000" in sys_prompt  # câu trả lời cuối thấy số liệu gốc từ tool

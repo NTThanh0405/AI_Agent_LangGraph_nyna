@@ -36,17 +36,16 @@ default_sections: [kpi_summary, revenue_by_channel, top_products]
 
 # Danh sách manager nhận báo cáo: khoá là Telegram ID (lấy bằng /myid).
 # Người trong danh sách này phải còn tồn tại và có role manager trong /users.
-# Mục nào manager không đủ quyền xem (quyền theo role trong permissions.py + data_grants) sẽ bị bỏ khỏi báo cáo và ghi audit.
-# Chưa có manager thật thì để "managers: {}". Khi có, bỏ dấu # ở khối mẫu và thay ID/tên.
-#managers: {}
-managers:
-  xx:                      # <-- Telegram ID thật của manager (/myid)
-    name: "CEO Thúy Anh"
-    send_time: "07:00"
-    sections: [kpi_summary, revenue_by_channel]
-    enabled: true
-  # 222222222:
-    # name: "Trần Thị B"
-    # send_time: "07:30"
-    # sections: [kpi_summary, top_products, customers_new_vs_returning]
-    # enabled: true
+# Mục nào manager không đủ quyền xem sẽ bị bỏ khỏi báo cáo và ghi audit.
+#
+# KHÔNG ghi Telegram ID thật vào file này (file nằm trong git). Trên máy chủ:
+#   1. chép file này thành config/reports.local.yaml (đã có trong .gitignore, không bị đẩy lên GitHub)
+#   2. trong bản .local, thay "managers: {}" bằng danh sách thật, ví dụ:
+#        managers:
+#          123456789:                  # Telegram ID thật (/myid), phải là SỐ
+#            name: "CEO"
+#            send_time: "07:00"
+#            sections: [kpi_summary, revenue_by_channel]
+#            enabled: true
+#   3. có reports.local.yaml thì service đọc file đó thay cho file này (cần restart lần đầu tạo file).
+managers: {}

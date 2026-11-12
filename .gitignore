@@ -9,3 +9,4 @@ data/
 static/
 sql/
 config/users_seed.yaml
+config/reports.local.yaml

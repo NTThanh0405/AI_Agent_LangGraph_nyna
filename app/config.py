@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     dashboard_base_url: str = ""
     dashboard_ttl_hours: int = 24
     dashboard_max_charts: int = 6
+    # Đường dẫn file logo (png/jpg/webp/svg) hiện ở góc trái mỗi trang dashboard; bỏ trống = không logo
+    dashboard_logo: str = ""
 
     checkpoint_database_url: Optional[SecretStr] = None  # bỏ trống -> MemorySaver (RAM)
 

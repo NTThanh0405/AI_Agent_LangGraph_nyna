@@ -328,7 +328,15 @@ TEMPLATE = r"""<!DOCTYPE html>
     });
     return { cur: cur, prev: prev, all: all };
   }
-  function scoped(c, f) { return c.scope === 'all' ? { cur: f.all, prev: [], all: f.all } : f; }
+  // scope 'all': dùng cả lịch sử; where {cột: giá trị}: lọc cố định riêng cho khối (vd. chỉ món chính)
+  function scoped(c, f, d) {
+    var s = c.scope === 'all' ? { cur: f.all, prev: [], all: f.all } : f;
+    if (!c.where) return s;
+    var conds = Object.keys(c.where).filter(function (k) { return d._ci[k] !== undefined; })
+      .map(function (k) { return [d._ci[k], String(c.where[k])]; });
+    function keep(r) { return conds.every(function (cd) { return key(r[cd[0]]) === cd[1]; }); }
+    return { cur: s.cur.filter(keep), prev: s.prev.filter(keep), all: s.all.filter(keep) };
+  }
 
   // ---------- cộng gộp ----------
   function groupBy(rows, kf) {
@@ -386,9 +394,12 @@ TEMPLATE = r"""<!DOCTYPE html>
       return mode === 'asc' ? va - vb : vb - va;
     };
   }
-  function sortByMetric(keys, groups, d, col, agg, denom, mode) {
+  function sortByMetric(keys, groups, d, col, agg, denom, mode, nullAsZero) {
     var base = new Map(), cmp = cmpVal(mode);
-    keys.forEach(function (k) { base.set(k, metric(groups.get(k), d, col, agg, denom)); });
+    keys.forEach(function (k) {
+      var v = metric(groups.get(k), d, col, agg, denom);
+      base.set(k, (v === null && nullAsZero) ? 0 : v);
+    });
     keys.sort(function (a, b) { return cmp(base.get(a), base.get(b)); });
   }
   function unionKeys(maps) {
@@ -403,7 +414,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 
   // ---------- mô hình cho biểu đồ đường / cột / tròn ----------
   function compute(c, d, f0, tc) {
-    var f = scoped(c, f0);
+    var f = scoped(c, f0, d);
     var isPie = c.type === 'pie' || c.type === 'doughnut';
     var xi = d._ci[c.x], oi = c.x_order ? d._ci[c.x_order] : -1;
     var ys = isPie ? [c.y[0]] : c.y;
@@ -419,8 +430,8 @@ TEMPLATE = r"""<!DOCTYPE html>
     var limit = c.limit || (isPie ? 6 : 0);
     var sortMode = c.sort || (limit && keys.length > limit ? 'desc' : null);
     if (!c.x_values && (sortMode === 'asc' || sortMode === 'desc')) {
-      if (c.sort_by) sortByMetric(keys, gc, d, c.sort_by, 'sum', null, sortMode);
-      else sortByMetric(keys, gc, d, ys[0], c.agg, c.denom, sortMode);
+      if (c.sort_by) sortByMetric(keys, gc, d, c.sort_by, 'sum', null, sortMode, c.null_as_zero);
+      else sortByMetric(keys, gc, d, ys[0], c.agg, c.denom, sortMode, c.null_as_zero);
     }
     var remap = new Map();
     if (limit && keys.length > limit) {
@@ -494,7 +505,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     return { t: (dl > 0 ? '▲ ' : '▼ ') + F.pct(dl), num: true, cls: ((dl > 0) !== !!down) ? 'good' : 'bad' };
   }
   function computeTable(c, d, f0, F) {
-    var f = scoped(c, f0);
+    var f = scoped(c, f0, d);
     if (!c.x) {   // bảng dữ liệu thô
       var cols = d.dataset.columns.map(function (col) { return colLabel(d, null, col); });
       var lim0 = c.limit || 200, raw = f.cur.slice(0, lim0);
@@ -563,7 +574,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     return { bg: hexAlpha(tc.heat, 0.08 + 0.82 * r), fg: r > 0.62 ? '#fff' : null };
   }
   function computePivot(c, d, f0, F, tc) {
-    var f = scoped(c, f0), ri = d._ci[c.row], ci = d._ci[c.col], vs = c.values, v0 = vs[0];
+    var f = scoped(c, f0, d), ri = d._ci[c.row], ci = d._ci[c.col], vs = c.values, v0 = vs[0];
     function m(rows, v) { return metric(rows, d, v.column, v.agg, v.denom); }
     var byRow = groupBy(f.cur, byCol(ri)), byC = groupBy(f.cur, byCol(ci));
     var cells = groupBy(f.cur, function (r) { return key(r[ri]) + '\u0001' + key(r[ci]); });
@@ -627,7 +638,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 
   // ---------- heatmap: hàng x cột (vd. thứ x giờ), ô tô đậm theo giá trị ----------
   function computeHeat(c, d, f0, F, tc) {
-    var f = scoped(c, f0), ri = d._ci[c.row], xi = d._ci[c.x];
+    var f = scoped(c, f0, d), ri = d._ci[c.row], xi = d._ci[c.x];
     var v = c.value || { column: c.y[0], agg: c.agg, denom: c.denom, format: c.format };
     var byRow = groupBy(f.cur, byCol(ri)), byX = groupBy(f.cur, byCol(xi));
     var rowKeys = Array.from(byRow.keys());

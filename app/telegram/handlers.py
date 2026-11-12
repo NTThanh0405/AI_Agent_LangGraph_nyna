@@ -90,7 +90,7 @@ HELP_TEXT = (
     "Lệnh nhanh:\n"
     "/tuan - tình hình kinh doanh tuần này\n"
     "/thang - tình hình kinh doanh tháng này\n"
-    "/dashboard - dashboard doanh thu tuần này\n"
+    "/dashboard - dashboard tổng quan tuần này\n"
     "/new - bắt đầu cuộc trò chuyện mới\n"
     "/sessions - xem, chuyển hoặc xoá các cuộc trò chuyện\n"
     "/quyen - xem bạn được xem những khối dữ liệu nào\n"
@@ -139,7 +139,7 @@ PROMPT_MONTH = (
     "Tình hình kinh doanh tháng này thế nào? Cho tôi các số liệu chính, so với tháng trước, "
     "và đề xuất."
 )
-PROMPT_DASHBOARD = "Tạo dashboard doanh thu tuần này."
+PROMPT_DASHBOARD = "Tạo dashboard tổng quan tuần này."
 
 _TAG = {OWNER: " (chủ)", ADMIN: " (admin)", STAFF: ""}
 

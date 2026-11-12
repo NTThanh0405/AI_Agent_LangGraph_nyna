@@ -30,7 +30,7 @@ import math
 from datetime import date, datetime, timedelta
 
 MAX_PERIOD_DAYS = 92          # kỳ dài nhất (kỳ trước cũng dài bằng)
-MAX_DATASET_ROWS = 60_000     # quá mức này trang nặng: thu hẹp kỳ hoặc bớt chiều chi tiết
+MAX_DATASET_ROWS = 20_000     # số dòng tối đa của một dataset trang mẫu (create_dashboard cũng dùng)
 HISTORY_WEEKS = 4             # biểu đồ "theo tuần" lấy ít nhất 4 tuần gần nhất
 
 HOURS = [f"{h:02d}:00" for h in range(24)]
@@ -544,6 +544,8 @@ PRESETS = {
 
 # Thứ tự trang của báo cáo NYNA (theo mẫu)
 REPORT_PAGES = ["tong_quan", "cua_hang", "nen_tang", "san_pham", "hanh_vi"]
+# Mọi trang dựng sẵn được (có SQL mẫu): dùng cho create_dashboard(pages=...) và AnalysisBrief.dashboard_pages
+PAGE_NAMES = [n for n, p in PRESETS.items() if p.get("sql_template")]
 
 _CHART_TYPES = {"line", "bar", "pie", "doughnut", "table", "pivot", "heatmap"}
 _AGGS = {"sum", "avg", "ratio", "count"}
@@ -588,6 +590,12 @@ def period(d_from, d_to) -> dict:
     weeks = max(HISTORY_WEEKS, math.ceil(2 * n / 7))
     return {"d_from": a, "d_to": b, "p_from": a - timedelta(days=n), "p_to": a - timedelta(days=1),
             "n": n, "h_from": b - timedelta(days=7 * weeks - 1)}
+
+
+def last_full_week(today: date) -> tuple[date, date]:
+    """Kỳ mặc định khi người dùng không nói kỳ: tuần trọn vẹn gần nhất (thứ Hai–Chủ nhật đã qua)."""
+    end = today - timedelta(days=today.isoweekday())   # Chủ nhật gần nhất trước hôm nay
+    return end - timedelta(days=6), end
 
 
 def build_dataset_sql(name: str, d_from, d_to) -> str:

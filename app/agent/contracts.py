@@ -33,7 +33,24 @@ class AnalysisBrief(_Base):
     preferred_query: Optional[str] = None                  # tên file trong queries/, không có đuôi .sql
     needs_chart: bool = False
     needs_dashboard: bool = False
+    # Trang dashboard dựng sẵn người dùng muốn (tong_quan, cua_hang...; xem dashboard_presets.PAGE_NAMES).
+    # Rỗng = báo cáo đầy đủ 5 trang chính; ["custom"] = yêu cầu không khớp trang nào (Designer tự khai báo).
+    dashboard_pages: list[str] = Field(default_factory=list, max_length=8)
     notes: str = Field(default="", max_length=1000)        # lưu ý nghiệp vụ (ngày lễ, khuyến mãi...)
+
+    @field_validator("dashboard_pages")
+    @classmethod
+    def _known_pages_only(cls, v: list[str]) -> list[str]:
+        """Bỏ tên trang lạ (LLM viết sai) thay vì làm hỏng cả bản tóm tắt; giữ thứ tự, bỏ trùng."""
+        from app.agent.tools.dashboard_presets import PAGE_NAMES
+
+        allowed = set(PAGE_NAMES) | {"custom"}
+        out: list[str] = []
+        for name in v:
+            n = (name or "").strip().lower()
+            if n in allowed and n not in out:
+                out.append(n)
+        return out
 
     @field_validator("preferred_query")
     @classmethod

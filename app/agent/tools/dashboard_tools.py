@@ -1,8 +1,9 @@
 # app/agent/tools/dashboard_tools.py
-# Tool tạo dashboard HTML theo yêu cầu người dùng.
-# LLM chỉ MÔ TẢ dashboard: một tiêu đề chung + danh sách dashboard con (mỗi cái là một tab,
-# ví dụ "Doanh thu", "Kho"). Mỗi dashboard con gồm: một preset (bố cục mẫu), MỘT câu SELECT
-# trả dataset chi tiết, và (nếu không dùng preset) danh sách bộ lọc, KPI, biểu đồ.
+# Tool tạo dashboard HTML theo yêu cầu người dùng. Hai cách gọi:
+#   1. TRANG CÓ SẴN (ưu tiên): pages=["tong_quan", ...] + period_start/period_end. Code tự dựng SQL
+#      (dashboard_presets.build_dataset_sql, gồm kỳ trước), bố cục và màu theo mẫu; LLM không viết SQL.
+#   2. TỰ KHAI BÁO (yêu cầu không có trang sẵn): dashboards=[...] với preset "default", mỗi tab một câu
+#      SELECT chi tiết + bộ lọc, KPI, biểu đồ.
 # Code tự chạy SQL (qua đúng check_select + phân quyền theo vai trò), nhúng dataset vào
 # template cố định; việc lọc và cộng gộp diễn ra ngay trên trình duyệt của người xem.
 # Lưu file với tên ngẫu nhiên rồi trả MỘT link duy nhất. LLM không tự viết HTML.
@@ -11,7 +12,6 @@
 # cleanup_loop xoá file quá DASHBOARD_TTL_HOURS.
 
 import asyncio
-import json
 import logging
 import math
 import os
@@ -28,13 +28,14 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field, ValidationError
 
 from app.agent.permissions import PermissionDenied, ensure_access_user
+from app.agent.tools import dashboard_presets as P
 from app.agent.tools.dashboard_presets import (
     describe_presets,
     get_preset,
     get_theme,
     preset_names,
 )
-from app.agent.tools.dashboard_template import TEMPLATE
+from app.agent.tools.dashboard_template import logo_data_uri, render_html
 from app.agent.tools.sql_tools import _caller
 from app.config import get_settings
 from app.db.guard import UnsafeSQLError, check_select
@@ -150,6 +151,11 @@ def _json_value(v):
 
 def _resolve(d: DashboardSpec) -> dict:
     """Ghép preset với phần LLM tự khai báo (LLM khai báo thì ưu tiên hơn preset)."""
+    if d.preset in P.PAGE_NAMES:
+        raise _ChartError(
+            f"dashboard '{d.name}': '{d.preset}' là trang có sẵn. Gọi lại create_dashboard với "
+            f"pages=['{d.preset}'] và period_start/period_end, không truyền dashboards/dataset_sql."
+        )
     try:
         p = get_preset(d.preset)
     except KeyError:
@@ -211,26 +217,6 @@ def _validate(name: str, columns: list[str], rows: list, filters, kpis, charts) 
             raise _ChartError(f"dashboard '{name}': cột ky chỉ được nhận 'nay' hoặc 'truoc', đang có {sorted(map(str, bad))}")
 
 
-async def _build_dataset(conn, name: str, sql: str, user_id: Optional[str], role: Optional[str]) -> dict:
-    """Chạy câu SELECT của một dashboard con và đóng gói dataset cho template."""
-    try:
-        checked = check_select(sql, MAX_DATASET_ROWS)
-        await ensure_access_user(role, user_id, checked.tables)  # staff: tính cả quyền được cấp riêng
-    except (UnsafeSQLError, PermissionDenied) as e:
-        raise _ChartError(f"dashboard '{name}': câu SQL bị từ chối: {e}")
-
-    cursor = await conn.execute(checked.sql)
-    fetched = await cursor.fetchall()
-    if len(fetched) > MAX_DATASET_ROWS:
-        raise _ChartError(
-            f"dashboard '{name}': dataset có hơn {MAX_DATASET_ROWS} dòng, "
-            "hãy GROUP BY thô hơn (ngày/giờ/cửa hàng/nền tảng) hoặc thu hẹp khoảng thời gian"
-        )
-    columns = [c.name for c in cursor.description]
-    rows = [[_json_value(v) for v in r] for r in fetched]
-    return {"columns": columns, "rows": rows}
-
-
 def _dir_full(directory: Path) -> bool:
     count = total = 0
     for p in directory.glob("*.html"):
@@ -257,60 +243,145 @@ def list_dashboard_presets() -> str:
     return describe_presets()
 
 
+VN_TODAY = lambda: datetime.now(VN_TZ).date()  # noqa: E731  (test thay bằng ngày cố định)
+
+
+def _vn(d: date) -> str:
+    return d.strftime("%d/%m/%Y")
+
+
+def _logo() -> Optional[str]:
+    path = (get_settings().dashboard_logo or "").strip()
+    if not path:
+        return None
+    try:
+        return logo_data_uri(path)
+    except (OSError, ValueError):
+        logger.warning("Không đọc được logo dashboard %s, bỏ qua logo", path)
+        return None
+
+
+async def _fetch(conn, label: str, sql: str, max_rows: int, user_id: Optional[str], role: Optional[str]) -> tuple[list, list]:
+    """Chạy một câu SELECT qua đúng guard + kiểm tra quyền như mọi truy vấn khác của agent."""
+    try:
+        checked = check_select(sql, max_rows)
+        await ensure_access_user(role, user_id, checked.tables)  # staff: tính cả khối được cấp riêng
+    except (UnsafeSQLError, PermissionDenied) as e:
+        raise _ChartError(f"{label}: câu SQL bị từ chối: {e}")
+    cursor = await conn.execute(checked.sql)
+    fetched = await cursor.fetchall()
+    if len(fetched) > max_rows:
+        raise _ChartError(f"{label}: dữ liệu quá {max_rows} dòng, hãy thu hẹp khoảng thời gian")
+    columns = [c.name for c in cursor.description]
+    return columns, [[_json_value(v) for v in r] for r in fetched]
+
+
+async def _build_pages(pages: list[str], d_from: date, d_to: date,
+                       user_id: Optional[str], role: Optional[str]) -> tuple[list[dict], int]:
+    """Dựng các trang có sẵn. Trang dùng chung SQL (tong_quan, cua_hang, hanh_vi) chỉ truy vấn một lần."""
+    cache: dict[str, tuple[list, list]] = {}
+    tabs, total = [], 0
+    async with get_pool().connection() as conn:
+        for name in pages:
+            sql = P.build_dataset_sql(name, d_from, d_to)
+            if sql not in cache:
+                cache[sql] = await _fetch(conn, f"trang '{name}'", sql, P.MAX_DATASET_ROWS, user_id, role)
+                total += len(cache[sql][1])
+                if total > MAX_TOTAL_ROWS * 2:
+                    raise _ChartError("dữ liệu các trang quá lớn, hãy chọn ít trang hơn hoặc thu hẹp khoảng thời gian")
+            columns, rows = cache[sql]
+            try:
+                tabs.append(P.build_dashboard(name, columns, rows))
+            except ValueError as e:
+                raise _ChartError(f"trang '{name}': {e}")
+    return tabs, total
+
+
+async def _build_custom(dashboards: list["DashboardSpec"], user_id: Optional[str], role: Optional[str],
+                        max_charts: int) -> tuple[list[dict], int]:
+    """Đường tự khai báo (preset 'default'): mỗi tab một câu SELECT + bộ lọc, KPI, biểu đồ."""
+    if len(dashboards) > MAX_DASHBOARDS:
+        raise _ChartError(f"tối đa {MAX_DASHBOARDS} dashboard trong một link, hãy giảm bớt")
+    resolved = [_resolve(d) for d in dashboards]
+    for r in resolved:
+        if len(r["charts"]) > max_charts:
+            raise _ChartError(f"mỗi dashboard tối đa {max_charts} biểu đồ, hãy giảm bớt")
+    built, total = [], 0
+    async with get_pool().connection() as conn:
+        for d, r in zip(dashboards, resolved):
+            name = d.name.strip()[:40] or f"Dashboard {len(built) + 1}"
+            columns, rows = await _fetch(conn, f"dashboard '{name}'", d.dataset_sql, MAX_DATASET_ROWS, user_id, role)
+            total += len(rows)
+            if total > MAX_TOTAL_ROWS:
+                raise _ChartError(f"tổng dataset của các tab vượt {MAX_TOTAL_ROWS} dòng, hãy giảm bớt hoặc gom nhóm thô hơn")
+            _validate(name, columns, rows, r["filters"], r["kpis"], r["charts"])
+            built.append({
+                "name": name,
+                "theme": r["theme"],
+                "labels": dict(P.COLUMN_LABELS),
+                "dataset": {"columns": columns, "rows": rows},
+                "filters": [f.model_dump() for f in r["filters"]],
+                "kpis": [k.model_dump() for k in r["kpis"]],
+                "charts": [c.model_dump() for c in r["charts"]],
+            })
+    return built, total
+
+
 @tool
 async def create_dashboard(
-    title: str, dashboards: list[DashboardSpec], config: RunnableConfig
+    config: RunnableConfig,
+    pages: Optional[list[str]] = None,
+    period_start: Optional[date] = None,
+    period_end: Optional[date] = None,
+    title: str = "",
+    dashboards: Optional[list[DashboardSpec]] = None,
 ) -> str:
-    """Tạo trang dashboard HTML trực quan (KPI, biểu đồ cột/đường/tròn, bảng, bộ lọc) rồi trả về MỘT LINK để xem.
+    """Tạo trang dashboard HTML (KPI, biểu đồ, bảng, bộ lọc, so sánh kỳ trước) rồi trả về MỘT LINK để xem.
 
-    Chỉ dùng khi người dùng yêu cầu dashboard, biểu đồ hoặc báo cáo trực quan.
-    Luôn gọi tool này ĐÚNG MỘT LẦN cho mỗi yêu cầu. Nếu người dùng muốn nhiều dashboard
-    (ví dụ doanh thu và kho), đưa tất cả vào danh sách `dashboards`: mỗi phần tử là một tab
-    trong cùng một link, mỗi tab có bộ lọc riêng. Chỉ có một dashboard thì không hiện tab.
+    Gọi ĐÚNG MỘT LẦN cho mỗi yêu cầu, theo một trong hai cách:
 
-    Mỗi dashboard chỉ có MỘT dataset_sql (câu SELECT nhẹ, ở mức chi tiết, vài nghìn dòng trở xuống);
-    bộ lọc, KPI và biểu đồ cộng gộp từ dataset đó ngay trên trang. Muốn có KPI và biểu đồ
-    so sánh kỳ trước thì dataset có cột ky nhận 'nay' hoặc 'truoc'. Nên chọn preset
-    (xem list_dashboard_presets) rồi chỉ cần viết dataset_sql đúng cột; preset 'default' thì tự
-    khai báo filters, kpis, charts. Chỉ dùng bảng người dùng được phép xem.
-    Dashboard là ảnh chụp số liệu lúc tạo và tự hết hạn sau một thời gian.
+    1. Trang có sẵn (ưu tiên): truyền `pages` và kỳ `period_start`, `period_end` (YYYY-MM-DD, gồm hai đầu,
+       tối đa 92 ngày). Trang: tong_quan (tổng quan hiệu suất), cua_hang, nen_tang, san_pham,
+       hanh_vi (giờ cao điểm), hoi_vien, don_online. pages rỗng = 5 trang chính. Bỏ trống kỳ = tuần trọn
+       vẹn gần nhất. KHÔNG viết SQL: hệ thống tự dựng SQL, kỳ trước và bố cục.
+    2. Yêu cầu không có trang sẵn: truyền `dashboards` (preset 'default'), mỗi phần tử là một tab với
+       MỘT dataset_sql chi tiết + filters, kpis, charts tự khai báo.
+
+    Dashboard là ảnh chụp số liệu lúc tạo, chỉ chứa dữ liệu người hỏi được xem, và tự hết hạn.
     """
     s = get_settings()
     if not s.dashboard_base_url:
         return "Chưa cấu hình DASHBOARD_BASE_URL nên chưa tạo được dashboard."
-    if not dashboards:
-        return "Cần ít nhất một dashboard."
-    if len(dashboards) > MAX_DASHBOARDS:
-        return f"Tối đa {MAX_DASHBOARDS} dashboard trong một link, hãy giảm bớt."
-
     user_id, role = _caller(config)
-    built = []
-    total_rows = 0
+    period_note = ""
     try:
-        resolved = [_resolve(d) for d in dashboards]
-        for d, r in zip(dashboards, resolved):
-            if len(r["charts"]) > s.dashboard_max_charts:
-                return f"Mỗi dashboard tối đa {s.dashboard_max_charts} biểu đồ, hãy giảm bớt."
-        # Mọi câu SQL của mọi tab đều đi qua check_select + ensure_access_user theo vai trò
-        # và quyền cấp riêng của người tạo, nên file chỉ chứa dữ liệu mà người này được phép xem.
-        async with get_pool().connection() as conn:
-            for d, r in zip(dashboards, resolved):
-                name = d.name.strip()[:40] or f"Dashboard {len(built) + 1}"
-                dataset = await _build_dataset(conn, name, d.dataset_sql, user_id, role)
-                total_rows += len(dataset["rows"])
-                if total_rows > MAX_TOTAL_ROWS:
-                    raise _ChartError(
-                        f"tổng dataset của các tab vượt {MAX_TOTAL_ROWS} dòng, hãy giảm bớt hoặc gom nhóm thô hơn"
-                    )
-                _validate(name, dataset["columns"], dataset["rows"], r["filters"], r["kpis"], r["charts"])
-                built.append({
-                    "name": name,
-                    "theme": r["theme"],
-                    "dataset": dataset,
-                    "filters": [f.model_dump() for f in r["filters"]],
-                    "kpis": [k.model_dump() for k in r["kpis"]],
-                    "charts": [c.model_dump() for c in r["charts"]],
-                })
+        if dashboards:
+            if pages:
+                raise _ChartError("chỉ dùng MỘT cách: hoặc pages (trang có sẵn), hoặc dashboards (tự khai báo)")
+            built, total_rows = await _build_custom(dashboards, user_id, role, s.dashboard_max_charts)
+            page_title = "Dashboard"
+        else:
+            names = [str(p).strip().lower() for p in (pages or []) if str(p).strip()] or list(P.REPORT_PAGES)
+            names = list(dict.fromkeys(names))  # bỏ trùng, giữ thứ tự
+            bad = [n for n in names if n not in P.PAGE_NAMES]
+            if bad:
+                raise _ChartError(f"không có trang {bad}. Các trang có sẵn: {', '.join(P.PAGE_NAMES)}")
+            if len(names) > MAX_DASHBOARDS + 1:
+                raise _ChartError(f"tối đa {MAX_DASHBOARDS + 1} trang trong một link")
+            if (period_start is None) != (period_end is None):
+                raise _ChartError("cần cả period_start và period_end, hoặc bỏ trống cả hai (tuần trọn vẹn gần nhất)")
+            if period_start is None:
+                period_start, period_end = P.last_full_week(VN_TODAY())
+            try:
+                per = P.period(period_start, period_end)
+            except (TypeError, ValueError) as e:
+                raise _ChartError(f"kỳ không hợp lệ: {e}")
+            built, total_rows = await _build_pages(names, per["d_from"], per["d_to"], user_id, role)
+            page_title = built[0]["title"] if len(built) == 1 else "Báo cáo hiệu suất NYNA"
+            period_note = (
+                f" Kỳ {_vn(per['d_from'])}–{_vn(per['d_to'])}, so với kỳ trước "
+                f"{_vn(per['p_from'])}–{_vn(per['p_to'])}. Trang: {', '.join(t['name'] for t in built)}."
+            )
     except _ChartError as e:
         return f"Không tạo được dashboard: {e}"
     except psycopg.errors.QueryCanceled:
@@ -326,17 +397,14 @@ async def create_dashboard(
 
     now = datetime.now(VN_TZ)
     payload = {
-        "title": title.strip()[:120] or "Dashboard",
+        "title": (title or "").strip()[:120] or page_title,
         "generated": now.strftime("%d/%m/%Y %H:%M"),
         "expires": (now + timedelta(hours=s.dashboard_ttl_hours)).strftime("%d/%m/%Y %H:%M"),
+        "logo": _logo(),
         "dashboards": built,
     }
-    # Thoát <, >, & để dữ liệu không thể đóng thẻ <script> hay chèn HTML
-    blob = (
-        json.dumps(payload, ensure_ascii=False)
-        .replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    )
-    html = TEMPLATE.replace("__PAYLOAD__", blob)
+    # render_html thoát < > & U+2028 U+2029 nên dữ liệu không thể đóng thẻ <script> hay chèn HTML
+    html = render_html(payload)
 
     directory = Path(s.dashboard_dir)
     name = secrets.token_hex(24)  # 192 bit ngẫu nhiên, không đoán được
@@ -357,7 +425,7 @@ async def create_dashboard(
     )
     url = f"{s.dashboard_base_url.rstrip('/')}/{name}.html"
     return (
-        f"Đã tạo dashboard '{payload['title']}' ({len(built)} dashboard trong cùng một link). "
+        f"Đã tạo dashboard '{payload['title']}' ({len(built)} trang trong cùng một link).{period_note} "
         f"Link xem (hết hạn sau {s.dashboard_ttl_hours} giờ): {url}\n"
         "Hãy gửi nguyên văn link này cho người dùng."
     )

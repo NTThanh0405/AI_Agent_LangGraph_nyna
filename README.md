@@ -89,12 +89,25 @@ Telegram (boss / manager / staff)
 |---|---|---|---|
 | 1 | `supervisor` | Điều phối bằng luật, **không gọi LLM**. Câu chào hỏi đi thẳng tới `chat`; "báo cáo hôm nay" dựng ngay báo cáo như bản 7h sáng | — |
 | 2 | `analyst` | Đổi câu hỏi thành `AnalysisBrief` (intent, chỉ số, chiều, bộ lọc, cụm thời gian). Cụm thời gian được `periods.py` đổi ra ngày | Haiku |
-| 3 | `coder` | Viết và chạy SQL qua tool, tổng kết số liệu | Sonnet |
+| 3 | `coder` | Lấy số liệu: ưu tiên tool phân tích dùng SQL viết sẵn (`business_snapshot`, `compare_periods`, `analyze_trend`, `explain_change`), không đủ thì tự viết `SELECT` | Sonnet |
 | 4 | `designer` | Chỉ chạy khi cần biểu đồ/dashboard: gọi `create_dashboard`, trả link | Haiku |
 | 5 | `chat` | Soạn câu trả lời cuối bằng tiếng Việt từ dữ liệu đã thu thập (prompt `supervisor.md`) | Sonnet |
 
 Chống lặp: tổng số lần chuyển giữa các agent tối đa `max_handoffs` (8); mỗi worker tối đa `max_steps` vòng tool.
 Lượt lỗi, quá giờ hoặc quá bước thì phiên bị xoá để không để lại hội thoại dở dang.
+
+### Tool của từng agent
+
+| Agent | Tool | Ghi chú |
+|---|---|---|
+| coder | `business_snapshot`, `compare_periods`, `analyze_trend`, `explain_change` | Dùng SQL trong `app/agent/queries/` nên số liệu khớp báo cáo sáng |
+| coder | `get_period_events`, `get_business_targets`, `get_date_range`, `get_business_knowledge` | Tri thức: sự kiện trong kỳ, mục tiêu, đổi cụm thời gian, tài liệu nghiệp vụ |
+| coder | `list_tables`, `describe_table`, `get_sample_rows`, `run_select_query` | Tự viết `SELECT` khi tool trên không trả lời được |
+| designer | `create_dashboard`, `list_dashboard_presets`, `list_tables`, `describe_table` | Dựng dashboard |
+
+Tool đọc database đều kiểm tra quyền của người hỏi. Mỗi lượt, system prompt ghi rõ vai trò và các khối dữ liệu
+người hỏi được xem ("Khối dữ liệu được xem: coffee (Nyna Coffee (iPOS))."). Cụm "cùng kỳ năm ngoái/tháng trước"
+không được tự đoán: tool báo lỗi để agent truyền khoảng ngày cụ thể.
 
 ### Nguyên tắc thiết kế
 
@@ -136,7 +149,7 @@ run_windows.py            điểm chạy không Docker: `agent` hoặc `dashboar
 docker-compose.yml, nginx-dash.conf   chạy bằng Docker (xem lưu ý về Dockerfile)
 ```
 
-Không có trong repo (nằm trong `.gitignore`, phải tự tạo): `.env`, `config/users_seed.yaml`, `sql/` (script tạo role),
+Không có trong repo (nằm trong `.gitignore`, phải tự tạo): `.env`, `config/users_seed.yaml`, `config/reports.local.yaml`, `sql/` (script tạo role),
 `static/chart.umd.min.js`, `data/`.
 
 ---
@@ -236,8 +249,15 @@ payload = build_report("2026-11-02", "2026-11-08", run_query,          # run_que
 html = render_html(payload)   # luôn dùng render_html: nó thoát </script> và đổi Decimal/date/NaN
 ```
 
-> **Lưu ý:** tool `create_dashboard` hiện vẫn nhận `dataset_sql` do agent viết theo SQL mẫu của preset;
-> chưa nối `build_report(pages, period)`. Xem [Trạng thái](#trạng-thái-và-việc-còn-dở).
+Agent gọi tool `create_dashboard` theo một trong hai cách:
+
+| Cách | Tham số | Khi nào |
+|---|---|---|
+| Trang có sẵn | `pages=["tong_quan", ...]`, `period_start`, `period_end` | Mọi yêu cầu khớp một trang mẫu. Không viết SQL; `pages` rỗng = 5 trang chính; bỏ trống kỳ = tuần trọn vẹn gần nhất. Trang dùng chung SQL chỉ truy vấn một lần |
+| Tự khai báo | `dashboards=[{preset: "default", dataset_sql, filters, kpis, charts}]` | Yêu cầu không có trang sẵn (Analyst ghi `dashboard_pages: ["custom"]`) |
+
+Analyst chọn trang vào trường `dashboard_pages` của `AnalysisBrief`; lệnh `/dashboard` dựng trang Tổng quan tuần này.
+Mọi câu SQL (kể cả SQL mẫu) đều qua `guard` và kiểm tra quyền của người hỏi; staff chưa được cấp khối bị từ chối.
 
 ### Cách gửi dashboard
 
@@ -247,14 +267,17 @@ html = render_html(payload)   # luôn dùng render_html: nó thoát </script> v�
 3. Cloudflare Tunnel đưa web dashboard ra Internet qua HTTPS; bot gửi link `DASHBOARD_BASE_URL/<tên>.html`.
 4. File tự xoá sau `DASHBOARD_TTL_HOURS` (kiểm tra mỗi 5 phút); thư mục giới hạn 500 file / 200 MB.
 
-Giới hạn mỗi link: 6 tab, 10.000 dòng mỗi tab, 30.000 dòng cả link. Trang có CSP chặn gửi dữ liệu ra ngoài
+Giới hạn: trang có sẵn tối đa 20.000 dòng mỗi dataset; tự khai báo tối đa 6 tab, 10.000 dòng mỗi tab, 30.000 dòng cả link. Trang có CSP chặn gửi dữ liệu ra ngoài
 (`connect-src 'none'`), `noindex`, `no-store`. Thiếu `chart.umd.min.js` thì biểu đồ tự chuyển thành bảng số.
 
 ---
 
 ## Báo cáo sáng
 
-- Cấu hình ở `config/reports.yaml`, **tự nạp lại trong vòng 1 phút**. File sai cú pháp thì giữ cấu hình cũ và ghi log.
+- Cấu hình thật ở `config/reports.local.yaml` (chứa Telegram ID, **không commit**, có trong `.gitignore`). `config/reports.yaml`
+  trong git chỉ là mẫu (`managers: {}`): trên máy chủ chép thành `reports.local.yaml` rồi điền ID thật (phải là **số**).
+  Có file `.local` thì bot đọc file đó (cần restart lần đầu tạo file); biến môi trường `REPORTS_CONFIG` (nếu đặt) được ưu tiên hơn cả.
+- **Tự nạp lại trong vòng 1 phút** khi sửa. File sai thì giữ cấu hình cũ và ghi log.
 - Chỉ người có tên trong mục `managers` (khoá là Telegram ID) **và** đang có role `manager` mới nhận.
 - Mỗi manager có `send_time`, `sections`, `enabled` riêng; không khai báo thì dùng `default_send_time`, `default_sections`.
 - Mục dùng được (mỗi mục là một file trong `app/agent/queries/`):
@@ -449,6 +472,7 @@ DASHBOARD_DIR=data/dashboards        # Docker: /data/dashboards
 DASHBOARD_STATIC_DIR=static          # chỉ dùng cho app/dashboard_web.py
 DASHBOARD_TTL_HOURS=24
 DASHBOARD_MAX_CHARTS=6
+DASHBOARD_LOGO=                      # tuỳ chọn: đường dẫn file logo (png/jpg/webp/svg) hiện ở góc trang
 
 # --- Phiên chat, giới hạn, vận hành ---
 MAX_SESSIONS_PER_USER=5
@@ -481,7 +505,8 @@ CLOUDFLARED_IMAGE_TAG=latest         # nên ghim phiên bản đang chạy ổn
 |---|---|---|
 | `config/agents.yaml` | Model, `max_steps`, timeout, `max_tokens` từng agent; `max_handoffs` | Restart |
 | `config/scopes.yaml` | Khối dữ liệu, quyền mặc định theo role, connector API (mẫu) | Restart |
-| `config/reports.yaml` | Báo cáo sáng: ai nhận, mục nào, mấy giờ | Tự nạp trong 1 phút |
+| `config/reports.yaml` | Mẫu báo cáo sáng trong git (`managers: {}`) | — |
+| `config/reports.local.yaml` | Báo cáo sáng thật: ai nhận (Telegram ID), mục nào, mấy giờ (không commit) | Tự nạp trong 1 phút (tạo lần đầu: restart) |
 | `config/targets.yaml` | Mục tiêu kinh doanh theo tháng (đang để `null`) | Tự nạp |
 | `config/thresholds.yaml` | Ngưỡng gắn cờ biến động (đang để `null`) | Tự nạp |
 | `config/users_seed.yaml` | Người dùng đầu tiên (không commit) | Chỉ nạp khi bảng `users` trống |
@@ -551,7 +576,8 @@ Chấm đúng/sai so với số liệu từ `queries/`, đúng đường đi tro
 | psycopg lỗi về event loop trên Windows | Đang chạy thẳng `uvicorn`; phải chạy `python run_windows.py agent` |
 | "Không có quyền truy cập..." | Bảng ngoài `dwh`, hoặc staff chưa được `/capquyen <id> coffee` |
 | Truy vấn bị huỷ vì quá lâu | Thu hẹp kỳ; hoặc tăng `DB_STATEMENT_TIMEOUT_MS` có cân nhắc. Nên có index trên `fact_sales(tran_date)` |
-| Báo cáo sáng không gửi / thiếu mục | Manager chưa có trong `reports.yaml` hoặc không có role `manager`; quá `max_delay_minutes`; mục `target_vs_actual` chưa có SQL. Xem `/api/v1/health/reports` |
+| Log báo `managers.xx: khoá phải là Telegram ID dạng số` | Khoá manager phải là số. Đừng che ID trong `reports.yaml`; ghi ID thật vào `config/reports.local.yaml` (không commit) |
+| Báo cáo sáng không gửi / thiếu mục | Manager chưa có trong `reports.local.yaml` hoặc không có role `manager`; quá `max_delay_minutes`; mục `target_vs_actual` chưa có SQL. Xem `/api/v1/health/reports` |
 | Dashboard mở ra không có biểu đồ (chỉ bảng số) | Thiếu `static/chart.umd.min.js` |
 | Link dashboard 404 | Hết hạn (`DASHBOARD_TTL_HOURS`), hoặc hostname Cloudflare chưa trỏ đúng web dashboard |
 | VS Code báo "unusual line terminators" ở `dashboard_template.py` | Bấm **Ignore**, không bấm Remove (bản hiện tại đã dùng `\u2028` dạng ASCII) |
@@ -572,17 +598,10 @@ Chấm đúng/sai so với số liệu từ `queries/`, đúng đường đi tro
 
 Còn dở hoặc chưa nối:
 
-- [ ] **Tool `create_dashboard` chưa nhận `pages` + `period_start/period_end`** (chưa gọi `build_report`, chưa dùng
-      `render_html`), trong khi `prompts/designer.md` đã hướng dẫn dùng cách này; `AnalysisBrief` chưa có trường
-      `dashboard_pages` mà `prompts/analyst.md` yêu cầu. Cần sửa tool + contract cho khớp prompt.
 - [ ] `app/agent/tools/api_tools.py` (gọi API khối house/misa/base) chưa có; `tests/test_api_tools.py` và một test
       trong `test_graph_flow.py` đang lỗi vì thiếu file này.
-- [ ] Prompt chưa có dòng "Khối dữ liệu được xem: ..." (`test_scopes.py::test_system_prompt_lists_scopes_from_config` lỗi).
 - [ ] `app/agent/queries/target_vs_actual.sql` chưa có (4 test trong `test_report_queries.py` lỗi); `targets.yaml`,
       `thresholds.yaml` còn để trống.
-- [ ] Tool đã viết nhưng chưa đăng ký cho agent: `get_sample_rows` (`explore_tools.py`), `get_date_range` (`period_tools.py`), `compare_periods`,
-      `analyze_trend`, `explain_change` (`analysis_tools.py`), `business_snapshot` (`snapshot_tools.py`),
-      `get_business_knowledge`, `get_period_events`, `get_business_targets` (`context_tools.py`).
 - [ ] Node `reviewer` (tắt trong `agents.yaml`, file còn trống).
 - [ ] `DELIVERY_MODE=file` (gửi file HTML qua Telegram) chưa được nối; dùng `link`.
 - [ ] `Dockerfile` chưa có trong repo.
