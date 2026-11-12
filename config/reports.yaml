@@ -29,7 +29,7 @@ footer: ""
 # footer: "Gõ /reply để hỏi tiếp về báo cáo này, ví dụ: /reply gửi dashboard doanh thu theo kênh"
 
 # Các mục báo cáo dùng được (tên file trong app/agent/queries/):
-#   kpi_summary, revenue_by_day, revenue_by_channel, top_products,
+#   kpi_summary, revenue_by_day, revenue_by_channel, top_products, bottom_products,
 #   customers_new_vs_returning, target_vs_actual
 # target_vs_actual cần bảng dwh.sales_targets (xem đầu file SQL); chưa có bảng thì đừng dùng mục này.
 default_sections: [kpi_summary, revenue_by_channel, top_products]
@@ -38,15 +38,15 @@ default_sections: [kpi_summary, revenue_by_channel, top_products]
 # Người trong danh sách này phải còn tồn tại và có role manager trong /users.
 # Mục nào manager không đủ quyền xem (quyền theo role trong permissions.py + data_grants) sẽ bị bỏ khỏi báo cáo và ghi audit.
 # Chưa có manager thật thì để "managers: {}". Khi có, bỏ dấu # ở khối mẫu và thay ID/tên.
-managers: {}
-#managers:
-#  111111111:                      # <-- Telegram ID thật của manager (/myid)
-#    name: "Nguyễn Văn A"
-#    send_time: "07:00"
-#    sections: [kpi_summary, revenue_by_channel]
-#    enabled: true
-#  222222222:
-#    name: "Trần Thị B"
-#    send_time: "07:30"
-#    sections: [kpi_summary, top_products, customers_new_vs_returning]
-#    enabled: true
+#managers: {}
+managers:
+  xx:                      # <-- Telegram ID thật của manager (/myid)
+    name: "CEO Thúy Anh"
+    send_time: "07:00"
+    sections: [kpi_summary, revenue_by_channel]
+    enabled: true
+  # 222222222:
+    # name: "Trần Thị B"
+    # send_time: "07:30"
+    # sections: [kpi_summary, top_products, customers_new_vs_returning]
+    # enabled: true

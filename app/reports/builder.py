@@ -53,6 +53,7 @@ SECTIONS: dict[str, Section] = {
     "revenue_by_day": Section("Doanh thu theo ngày", "revenue_by_day.sql"),
     "revenue_by_channel": Section("Doanh thu theo kênh", "revenue_by_channel.sql"),
     "top_products": Section("Sản phẩm bán chạy", "top_products.sql", top_n=5),
+    "bottom_products": Section("Sản phẩm bán chậm", "bottom_products.sql", top_n=5),
     "customers_new_vs_returning": Section("Khách mới và khách quay lại", "customers_new_vs_returning.sql"),
     "target_vs_actual": Section("Thực tế so với mục tiêu", "target_vs_actual.sql"),
 }
