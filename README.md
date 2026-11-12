@@ -96,6 +96,19 @@ Telegram (boss / manager / staff)
 Chống lặp: tổng số lần chuyển giữa các agent tối đa `max_handoffs` (8); mỗi worker tối đa `max_steps` vòng tool.
 Lượt lỗi, quá giờ hoặc quá bước thì phiên bị xoá để không để lại hội thoại dở dang.
 
+### Reviewer (tuỳ chọn, mặc định tắt)
+
+`app/agent/nodes/reviewer.py` soát câu trả lời cuối trước khi gửi: `... → chat → reviewer → END`.
+Bật bằng `config/agents.yaml` → `agents.reviewer.enabled: true` rồi restart; tắt thì graph không có node này.
+
+| Lớp | Làm gì | Chi phí |
+|---|---|---|
+| 1. Kiểm tra số bằng code | Mọi con số trong câu trả lời phải đối chiếu được với dữ liệu đã truy vấn (hiểu số rút gọn "41,5 triệu", %, chênh lệch, tỉ lệ, AOV). Bỏ qua ngày, giờ, link, số ≤ 10 | Không tốn |
+| 2. LLM soát lại (`prompts/reviewer.md`) | Chỉ chạy khi lớp 1 thấy số lạ, khi intent nằm trong `llm_intents` (mặc định `explain_change`), hoặc `mode: always`. Bản sửa chỉ được dùng nếu qua được lớp 1 | 1 lượt gọi Sonnet |
+
+Vẫn còn số chưa đối chiếu được thì giữ câu trả lời gốc và thêm dòng "⚠️ Lưu ý" (tắt bằng `add_note: false`).
+Reviewer lỗi hoặc quá giờ thì không chặn câu trả lời.
+
 ### Tool của từng agent
 
 | Agent | Tool | Ghi chú |
@@ -118,36 +131,6 @@ không được tự đoán: tool báo lỗi để agent truyền khoảng ngày
 5. **Một worker duy nhất**: khoá phiên, rate limit và lịch báo cáo nằm trong RAM. Không chạy nhiều bản.
 
 ---
-
-## Cấu trúc thư mục
-
-```
-app/
-  main.py                 khởi động: pool DB, tạo bảng, compile graph, chạy bot + tác vụ nền
-  config.py               đọc .env (Settings)
-  dashboard_web.py        web phục vụ dashboard khi KHÔNG dùng Docker (thay nginx)
-  audit.py                ghi agent_state.audit_log
-  api/v1/                 /api/v1/health, /health/db, /health/reports
-  db/                     pool.py (kết nối), guard.py (chỉ cho SELECT an toàn)
-  telegram/               bot.py, handlers.py (lệnh), auth.py (users/level), ratelimit.py, formatter.py, progress.py
-  reports/                builder.py (dựng báo cáo), scheduler.py (vòng gửi), subscriptions.py (reports.yaml), commentary.py
-  agent/
-    graph.py              dựng graph supervisor + worker
-    nodes/                supervisor, analyst, coder, designer, chat, router_rules (đường tắt), _common
-    prompts/*.md          system prompt từng agent (analyst, coder, designer, supervisor, report_commentary)
-    knowledge/            business_context.md, glossary.md, sql_examples.md, calendar.yaml, loader.py
-    queries/*.sql         SQL viết sẵn cho báo cáo sáng (tham số %(start)s, %(end)s, %(end_exclusive)s)
-    tools/                tool của agent + dashboard_presets.py (bố cục mẫu) + dashboard_template.py (HTML)
-    periods.py            đổi cụm thời gian tiếng Việt ra ngày
-    permissions.py, scopes.py, grants.py   phân quyền theo role và khối dữ liệu
-    sessions.py, runner.py, retention.py   phiên chat, chạy một lượt, dọn dữ liệu cũ
-    models.py, contracts.py, state.py      cấu hình model, kiểu dữ liệu giữa các agent, state của graph
-config/                   agents.yaml, scopes.yaml, reports.yaml, targets.yaml, thresholds.yaml (+ users_seed.yaml, không commit)
-deploy/windows/           cài Windows Service bằng WinSW, healthcheck
-tests/                    pytest + tests/eval (đánh giá chất lượng, gọi LLM thật)
-run_windows.py            điểm chạy không Docker: `agent` hoặc `dashboards`
-docker-compose.yml, nginx-dash.conf   chạy bằng Docker (xem lưu ý về Dockerfile)
-```
 
 Không có trong repo (nằm trong `.gitignore`, phải tự tạo): `.env`, `config/users_seed.yaml`, `config/reports.local.yaml`, `sql/` (script tạo role),
 `static/chart.umd.min.js`, `data/`.
@@ -602,7 +585,6 @@ Còn dở hoặc chưa nối:
       trong `test_graph_flow.py` đang lỗi vì thiếu file này.
 - [ ] `app/agent/queries/target_vs_actual.sql` chưa có (4 test trong `test_report_queries.py` lỗi); `targets.yaml`,
       `thresholds.yaml` còn để trống.
-- [ ] Node `reviewer` (tắt trong `agents.yaml`, file còn trống).
 - [ ] `DELIVERY_MODE=file` (gửi file HTML qua Telegram) chưa được nối; dùng `link`.
 - [ ] `Dockerfile` chưa có trong repo.
 - [ ] Các giả định dữ liệu cần chủ doanh nghiệp xác nhận: mục "Chưa rõ" cuối `app/agent/knowledge/business_context.md`.

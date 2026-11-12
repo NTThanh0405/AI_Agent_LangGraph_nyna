@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -31,6 +31,8 @@ class AgentSpec:
     timeout_seconds: int
     temperature: Optional[float]
     max_tokens: int
+    # Khoá riêng của từng agent ngoài các khoá chung ở trên (vd reviewer.mode); không kiểm tra ở đây
+    options: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -45,9 +47,12 @@ class AgentsConfig:
             raise AgentConfigError(f"agent không có trong config: {name!r}") from None
 
 
-def _pos_int(value, field: str, agent: str) -> int:
+_COMMON_KEYS = {"enabled", "model", "max_steps", "timeout_seconds", "temperature", "max_tokens"}
+
+
+def _pos_int(value, name: str, agent: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise AgentConfigError(f"{agent}.{field} phải là số nguyên dương, nhận {value!r}")
+        raise AgentConfigError(f"{agent}.{name} phải là số nguyên dương, nhận {value!r}")
     return value
 
 
@@ -75,6 +80,7 @@ def parse_agents_config(data: dict) -> AgentsConfig:
             timeout_seconds=_pos_int(raw.get("timeout_seconds"), "timeout_seconds", name),
             temperature=None if temp is None else float(temp),
             max_tokens=_pos_int(raw.get("max_tokens", 4096), "max_tokens", name),
+            options={k: v for k, v in raw.items() if k not in _COMMON_KEYS},
         )
     for name in REQUIRED_AGENTS:
         if name not in specs:

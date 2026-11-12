@@ -43,12 +43,16 @@ agents:
     timeout_seconds: 60
     max_tokens: 6000    # JSON của dashboard nhiều biểu đồ cần chỗ
 
-  reviewer:             # tuỳ chọn: soát lại kết quả trước khi trả; tắt để tiết kiệm chi phí
-    enabled: false
+  reviewer:             # tuỳ chọn: soát câu trả lời cuối trước khi gửi (app/agent/nodes/reviewer.py)
+    enabled: false      # đổi thành true rồi restart agent để bật
     model: claude-sonnet-5-5    # reviewer yếu hơn coder thì vô ích -> nếu bật thì dùng Sonnet
     max_steps: 1
     timeout_seconds: 30
-    max_tokens: 1500
+    max_tokens: 3000    # đủ chỗ viết lại cả câu trả lời khi cần sửa
+    # Lớp 1 (kiểm tra số bằng code, không tốn tiền) luôn chạy khi bật. Lớp 2 (gọi LLM) chạy khi:
+    mode: suspect       # suspect = chỉ khi lớp 1 thấy số lạ hoặc intent nằm trong llm_intents; always = mọi câu có số
+    llm_intents: [explain_change]   # câu "vì sao tăng/giảm" luôn được LLM soát
+    add_note: true      # vẫn còn số chưa đối chiếu được thì thêm dòng lưu ý cuối câu trả lời
 
 # Tổng số lần chuyển giữa các agent trong một câu hỏi (chống lặp vô hạn); graph dùng làm recursion_limit.
 max_handoffs: 8

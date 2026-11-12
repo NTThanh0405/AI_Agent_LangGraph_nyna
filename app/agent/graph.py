@@ -1,9 +1,10 @@
 # app/agent/graph.py
 # Graph v2 (supervisor + 3 worker):
-#   START -> supervisor -+-> analyst --------------> supervisor
+#   START -> supervisor  +-> analyst --------------> supervisor
 #                        +-> coder <-> coder_tools -> supervisor
 #                        +-> designer <-> designer_tools -> supervisor
 #                        +-> chat -> END         (soạn câu trả lời cuối)
+#                                 \-> reviewer -> END  (chỉ khi agents.reviewer.enabled: true)
 #                        +-> END                 (đường tắt: báo cáo đã có sẵn câu trả lời)
 # Chống lặp: supervisor giới hạn max_handoffs, mỗi worker giới hạn max_steps (config/agents.yaml),
 # runner đặt recursion_limit theo models.recursion_limit().
@@ -20,7 +21,9 @@ from app.agent.nodes.analyst import analyst_node
 from app.agent.nodes.chat import chat_node
 from app.agent.nodes.coder import make_coder_node
 from app.agent.nodes.designer import make_designer_node
+from app.agent.nodes.reviewer import reviewer_node
 from app.agent.nodes.supervisor import END_MARK, route_from_supervisor, supervisor_node
+from app.agent.models import AgentConfigError, load_agents_config
 from app.agent.state import AgentState
 from app.agent.scopes import load_scopes_config
 from app.agent.tools import API_TOOL_NAMES, TOOLS_BY_AGENT
@@ -31,6 +34,14 @@ def _tools_for(agent: str, allowed: Optional[set[str]]) -> list[BaseTool]:
     skip = set() if load_scopes_config().api_scopes() else API_TOOL_NAMES
     return [t for t in TOOLS_BY_AGENT.get(agent, [])
             if (allowed is None or t.name in allowed) and t.name not in skip]
+
+
+def reviewer_enabled() -> bool:
+    """Reviewer là tuỳ chọn: thiếu khối reviewer trong agents.yaml cũng coi như tắt."""
+    try:
+        return load_agents_config().get("reviewer").enabled
+    except AgentConfigError:
+        return False
 
 
 def build_graph(tools: Optional[Sequence[BaseTool]] = None, checkpointer: Optional[BaseCheckpointSaver] = None):
@@ -69,6 +80,11 @@ def build_graph(tools: Optional[Sequence[BaseTool]] = None, checkpointer: Option
             {"supervisor": "supervisor", f"{worker}_tools": f"{worker}_tools"},
         )
         g.add_edge(f"{worker}_tools", worker)
-    g.add_edge("chat", END)
+    if reviewer_enabled():
+        g.add_node("reviewer", reviewer_node)
+        g.add_edge("chat", "reviewer")
+        g.add_edge("reviewer", END)
+    else:
+        g.add_edge("chat", END)
 
     return g.compile(checkpointer=checkpointer if checkpointer is not None else MemorySaver())
