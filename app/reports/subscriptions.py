@@ -36,7 +36,6 @@ def _default_config_path() -> Path:
 CONFIG_PATH = _default_config_path()
 
 REPORT_ROLES = frozenset({"manager", "boss"})
-REPORT_ROLE = "manager"  
 
 
 class ConfigError(ValueError):
