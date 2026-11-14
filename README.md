@@ -5,7 +5,7 @@ xây bằng **LangGraph + Claude + PostgreSQL**, chạy 24/7 trên Windows Serve
 
 Người dùng nhắn tự nhiên, ví dụ *"doanh thu tuần này so với tuần trước?"*, *"món nào bán chậm tháng 10?"*,
 *"cho tôi dashboard tổng quan"*. Bot hiểu câu hỏi, tự viết và chạy câu `SELECT` (chỉ đọc), rồi trả lời
-kèm số liệu hoặc gửi link dashboard. Mỗi sáng bot tự gửi **báo cáo sáng** cho các manager đã đăng ký.
+kèm số liệu hoặc gửi link dashboard. Mỗi sáng bot tự gửi **báo cáo sáng** cho các boss và manager đã đăng ký.
 
 > - Không dùng n8n: bot nhận tin trực tiếp từ Telegram bằng long polling, không cần mở port hay webhook.
 > - Ngoài báo cáo sáng, bot chỉ làm việc khi có người hỏi; không có cảnh báo tự động nào khác.
@@ -41,8 +41,8 @@ kèm số liệu hoặc gửi link dashboard. Mỗi sáng bot tự gửi **báo 
 - **Dashboard HTML** dựng từ template cố định, gửi bằng link (Cloudflare Tunnel): 5 trang theo mẫu
   (Tổng quan, Cửa hàng, Nền tảng, Sản phẩm, Hành vi khách hàng) + 2 trang bổ sung; có bộ lọc, so sánh kỳ trước,
   heatmap, bảng chéo, tải CSV; sáng/tối theo máy người xem.
-- **Báo cáo sáng** cho manager: SQL viết sẵn, không qua LLM; đúng giờ, không gửi trùng, gửi bù khi restart;
-  gõ `/reply` để hỏi tiếp trong ngữ cảnh báo cáo.
+- **Báo cáo sáng** cho boss và manager: SQL viết sẵn, không qua LLM; đúng giờ, không gửi trùng, gửi bù khi restart;
+  so với mục tiêu tháng khai báo trong `config/targets.yaml`; gõ `/reply` để hỏi tiếp trong ngữ cảnh báo cáo.
 - **Phân quyền 3 tầng**: role (`boss`, `manager`, `staff`), cấp quản trị (`owner`, `admin`, thường) và
   **khối dữ liệu** cấp riêng cho nhân viên (có hạn dùng).
 - **An toàn**: chỉ `SELECT` (guard bằng sqlglot), kết nối PostgreSQL chỉ-đọc, che cột cá nhân của khách,
@@ -149,7 +149,7 @@ Không có trong repo (nằm trong `.gitignore`, phải tự tạo): `.env`, `co
 | `/dashboard` | Mọi người dùng có khối dữ liệu trong database | Dashboard doanh thu tuần này |
 | `/quyen` | Mọi người dùng | Xem mình được xem những khối dữ liệu nào |
 
-**Báo cáo sáng** (chỉ role `manager`):
+**Báo cáo sáng** (role `boss` và `manager`):
 
 | Lệnh | Tác dụng |
 |---|---|
@@ -261,8 +261,21 @@ Giới hạn: trang có sẵn tối đa 20.000 dòng mỗi dataset; tự khai b�
   trong git chỉ là mẫu (`managers: {}`): trên máy chủ chép thành `reports.local.yaml` rồi điền ID thật (phải là **số**).
   Có file `.local` thì bot đọc file đó (cần restart lần đầu tạo file); biến môi trường `REPORTS_CONFIG` (nếu đặt) được ưu tiên hơn cả.
 - **Tự nạp lại trong vòng 1 phút** khi sửa. File sai thì giữ cấu hình cũ và ghi log.
-- Chỉ người có tên trong mục `managers` (khoá là Telegram ID) **và** đang có role `manager` mới nhận.
-- Mỗi manager có `send_time`, `sections`, `enabled` riêng; không khai báo thì dùng `default_send_time`, `default_sections`.
+- Chỉ người có tên trong mục `managers` (khoá là Telegram ID) **và** đang có role `boss` hoặc `manager` mới nhận.
+  Tên mục vẫn là `managers` nhưng boss khai báo chung trong đó. Role được phép nhận nằm ở `REPORT_ROLES` trong
+  `app/reports/subscriptions.py`. Người nhận phải đã `/start` bot.
+- Mỗi người nhận có `send_time`, `sections`, `enabled` riêng; không khai báo thì dùng `default_send_time`, `default_sections`,
+  `enabled` mặc định là `true`.
+
+  ```yaml
+  # config/reports.local.yaml
+  managers:
+    123456789:                 # Telegram ID (số, lấy bằng /myid)
+      name: "Boss A"
+      send_time: "07:00"
+      sections: [kpi_summary, revenue_by_channel, target_vs_actual]
+  ```
+
 - Mục dùng được (mỗi mục là một file trong `app/agent/queries/`):
 
   | Mục | Nội dung |
@@ -273,13 +286,40 @@ Giới hạn: trang có sẵn tối đa 20.000 dòng mỗi dataset; tự khai b�
   | `top_products` | Món bán chạy |
   | `bottom_products` | Món bán chậm (gồm món không bán được) |
   | `customers_new_vs_returning` | Khách mới / quay lại |
-  | `target_vs_actual` | Thực tế so với mục tiêu — **chưa có file SQL, chưa dùng được** |
+  | `target_vs_actual` | Thực tế so với mục tiêu: hôm qua + luỹ kế tháng. Mục tiêu khai báo trong `config/targets.yaml` (không cần bảng SQL) |
 
 - Trạng thái đã gửi lưu ở `agent_state.report_state`: restart vẫn gửi bù, không gửi trùng trong ngày; bật lại muộn
   quá `max_delay_minutes` thì bỏ qua hôm đó. Mục vượt quyền bị bỏ khỏi báo cáo; một mục lỗi vẫn gửi phần còn lại.
 - Nhận xét 2–3 câu do LLM viết (`commentary_enabled: true`, model `COMMENTARY_MODEL`, mặc định Haiku); nhận xét chứa
   số không có trong báo cáo sẽ bị bỏ.
 - Sửa file trong `app/agent/queries/` thì phải **restart** (SQL được nạp một lần).
+
+### Mục tiêu kinh doanh (`config/targets.yaml`)
+
+Mục tiêu **không** lưu trong database: khai báo trong `config/targets.yaml`, sửa là tự nạp lại, không cần restart.
+Cùng một file được dùng cho mục `target_vs_actual` của báo cáo sáng và cho câu hỏi về mục tiêu khi chat
+(`app/agent/business_config.py`), nên số trong chat và báo cáo luôn khớp.
+
+```yaml
+defaults:
+  month:                    # mục tiêu MỖI THÁNG (VND, đã gồm VAT); null = chưa đặt
+    revenue: 300000000
+    orders: 1500
+    aov: null
+    new_customers: null
+    customers: null
+overrides:                  # tháng có mục tiêu riêng, khoá "YYYY-MM" (để trong ngoặc kép)
+  "2026-12":
+    revenue: 500000000
+```
+
+- Mục tiêu tháng được chia đều theo ngày (`revenue`, `orders`, `new_customers`); `aov` giữ nguyên giá trị;
+  `customers` chỉ có mục tiêu khi kỳ là đúng một tháng đầy đủ.
+- Mục `target_vs_actual` hiện mỗi chỉ số `revenue`, `orders`, `aov` theo 2 mốc: **hôm qua** và **luỹ kế từ đầu tháng**,
+  kèm phần còn thiếu so với mục tiêu cả tháng. Chỉ số chưa đặt mục tiêu thì không hiện; chưa đặt chỉ số nào thì
+  mục này báo "Chưa đặt mục tiêu".
+- Cờ `[CẢNH BÁO]` / `[NGHIÊM TRỌNG]` tính trên luỹ kế tháng, theo `achievement_vs_target` trong `config/thresholds.yaml`.
+- Số thực tế lấy từ `app/agent/queries/target_vs_actual.sql`; tên cột phải trùng tên chỉ số trong `targets.yaml`.
 
 ---
 
@@ -490,7 +530,7 @@ CLOUDFLARED_IMAGE_TAG=latest         # nên ghim phiên bản đang chạy ổn
 | `config/scopes.yaml` | Khối dữ liệu, quyền mặc định theo role, connector API (mẫu) | Restart |
 | `config/reports.yaml` | Mẫu báo cáo sáng trong git (`managers: {}`) | — |
 | `config/reports.local.yaml` | Báo cáo sáng thật: ai nhận (Telegram ID), mục nào, mấy giờ (không commit) | Tự nạp trong 1 phút (tạo lần đầu: restart) |
-| `config/targets.yaml` | Mục tiêu kinh doanh theo tháng (đang để `null`) | Tự nạp |
+| `config/targets.yaml` | Mục tiêu kinh doanh theo tháng, dùng cho báo cáo sáng và chat (đang để `null`) | Tự nạp |
 | `config/thresholds.yaml` | Ngưỡng gắn cờ biến động (đang để `null`) | Tự nạp |
 | `config/users_seed.yaml` | Người dùng đầu tiên (không commit) | Chỉ nạp khi bảng `users` trống |
 | `app/agent/queries/*.sql` | SQL báo cáo sáng | Restart |
@@ -529,10 +569,10 @@ pytest   # test nạp app.config cần ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, DB
 | `test_periods.py` | "Tuần này/tháng này" ở các ngày biên |
 | `test_graph_flow.py` | Đường đi trong graph (LLM giả) |
 | `test_knowledge.py` | Tài liệu nạp đúng; mọi ví dụ SQL qua guard và đúng quyền |
-| `test_reports.py`, `test_report_commands.py`, `test_report_queries.py` | Báo cáo sáng: cấu hình, đúng giờ, không trùng, SQL hợp lệ |
+| `test_reports.py`, `test_report_commands.py`, `test_report_queries.py` | Báo cáo sáng: cấu hình, đúng giờ, không trùng, SQL hợp lệ, boss/manager nhận báo cáo, mục tiêu từ `targets.yaml` |
 | `test_dashboard_web.py` | Web dashboard chỉ phục vụ đúng file |
 | `test_business_config.py`, `test_analysis_tools.py` | Mục tiêu, ngưỡng, tool phân tích |
-| `check_report_permissions.py` | Script (không phải test): mục báo cáo nào bị chặn quyền với manager |
+| `check_report_permissions.py` | Script (không phải test): mục báo cáo nào bị chặn quyền với một role (mặc định `manager`, ví dụ `... boss`) |
 
 **Đánh giá chất lượng trả lời** (gọi Claude và DB thật, **tốn chi phí**, không chạy trong `pytest`):
 
@@ -551,7 +591,6 @@ Chấm đúng/sai so với số liệu từ `queries/`, đúng đường đi tro
 | Triệu chứng | Nguyên nhân / cách xử lý |
 |---|---|
 | `Cách dùng: python run_windows.py [agent\|dashboards]` | Không phải lỗi: chạy kèm tham số `agent` hoặc `dashboards` |
-| `ImportError: cannot import name 'API_TOOL_NAMES'` | `graph.py` cần `API_TOOL_NAMES` trong `app/agent/tools/__init__.py`. Thêm `API_TOOL_NAMES: set[str] = set()` (chưa có khối API nào) |
 | App không khởi động, thiếu `CHECKPOINT_DATABASE_URL` | Biến bắt buộc: người dùng và phiên lưu trong `agent_app` |
 | `DELIVERY_MODE=link cần đặt DASHBOARD_BASE_URL` | Đặt `DASHBOARD_BASE_URL` khớp hostname Cloudflare |
 | Bot không phản hồi | Sai `TELEGRAM_BOT_TOKEN`, hoặc Telegram ID chưa có trong `users` (nhắn `/myid`, nhờ admin `/adduser`) |
@@ -560,7 +599,7 @@ Chấm đúng/sai so với số liệu từ `queries/`, đúng đường đi tro
 | "Không có quyền truy cập..." | Bảng ngoài `dwh`, hoặc staff chưa được `/capquyen <id> coffee` |
 | Truy vấn bị huỷ vì quá lâu | Thu hẹp kỳ; hoặc tăng `DB_STATEMENT_TIMEOUT_MS` có cân nhắc. Nên có index trên `fact_sales(tran_date)` |
 | Log báo `managers.xx: khoá phải là Telegram ID dạng số` | Khoá manager phải là số. Đừng che ID trong `reports.yaml`; ghi ID thật vào `config/reports.local.yaml` (không commit) |
-| Báo cáo sáng không gửi / thiếu mục | Manager chưa có trong `reports.local.yaml` hoặc không có role `manager`; quá `max_delay_minutes`; mục `target_vs_actual` chưa có SQL. Xem `/api/v1/health/reports` |
+| Báo cáo sáng không gửi / thiếu mục | Người nhận chưa có trong `reports.local.yaml`, không có role `boss`/`manager`, hoặc chưa `/start` bot; quá `max_delay_minutes`; mục `target_vs_actual` báo "chưa đặt mục tiêu" nếu `targets.yaml` còn trống. Xem `/api/v1/health/reports` |
 | Dashboard mở ra không có biểu đồ (chỉ bảng số) | Thiếu `static/chart.umd.min.js` |
 | Link dashboard 404 | Hết hạn (`DASHBOARD_TTL_HOURS`), hoặc hostname Cloudflare chưa trỏ đúng web dashboard |
 | VS Code báo "unusual line terminators" ở `dashboard_template.py` | Bấm **Ignore**, không bấm Remove (bản hiện tại đã dùng `\u2028` dạng ASCII) |
@@ -575,7 +614,7 @@ Chấm đúng/sai so với số liệu từ `queries/`, đúng đường đi tro
 - [x] Bot Telegram: polling, allowlist trong DB, phiên chat, lệnh quản trị, rate limit, audit
 - [x] Graph v2: supervisor (luật) + analyst + coder + designer + chat, cấu hình model từng agent
 - [x] Phân quyền role + khối dữ liệu (`coffee`), cấp quyền cho staff bằng lệnh
-- [x] Báo cáo sáng + `/reply`, đường tắt "báo cáo hôm nay"
+- [x] Báo cáo sáng cho boss và manager + `/reply`, đường tắt "báo cáo hôm nay"; so với mục tiêu từ `targets.yaml`
 - [x] Dashboard: template + 7 preset, gửi link qua Cloudflare Tunnel; chạy 24/7 bằng Windows Service
 - [x] Tri thức nghiệp vụ và prompt nạp vào từng agent; bộ eval chất lượng
 
@@ -583,8 +622,7 @@ Còn dở hoặc chưa nối:
 
 - [ ] `app/agent/tools/api_tools.py` (gọi API khối house/misa/base) chưa có; `tests/test_api_tools.py` và một test
       trong `test_graph_flow.py` đang lỗi vì thiếu file này.
-- [ ] `app/agent/queries/target_vs_actual.sql` chưa có (4 test trong `test_report_queries.py` lỗi); `targets.yaml`,
-      `thresholds.yaml` còn để trống.
+- [ ] `targets.yaml`, `thresholds.yaml` còn để trống (chủ doanh nghiệp điền mục tiêu tháng).
 - [ ] `DELIVERY_MODE=file` (gửi file HTML qua Telegram) chưa được nối; dùng `link`.
 - [ ] `Dockerfile` chưa có trong repo.
 - [ ] Các giả định dữ liệu cần chủ doanh nghiệp xác nhận: mục "Chưa rõ" cuối `app/agent/knowledge/business_context.md`.
