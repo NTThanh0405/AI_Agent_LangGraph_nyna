@@ -493,3 +493,50 @@ def test_executed_sql_is_the_guard_output_with_default_schema(queries, monkeypat
     build(pool, ["kpi_summary"])
     assert "dwh.fact_sales" in pool.calls[0][0].lower()                # bảng thiếu schema được gán dwh trước khi chạy
     assert set(pool.calls[0][1]) == {"start", "end", "end_exclusive"}
+
+
+# ------------------------------------------------------------ thực tế so với mục tiêu (targets.yaml)
+from app.agent import business_config as bc
+
+SQL_TARGET = ("SELECT sum(total) AS revenue, count(*) AS orders FROM public.orders "
+              "WHERE created_at >= %(start)s AND created_at < %(end_exclusive)s")
+TARGET_DATA = {
+    ("kpi", D(2026, 11, 5)): (["revenue", "orders"], [(Decimal("9000000"), 45)]),      # hôm qua
+    ("kpi", D(2026, 11, 1)): (["revenue", "orders"], [(Decimal("40000000"), 200)]),    # luỹ kế 01-05/11
+}
+
+
+@pytest.fixture()
+def target_env(queries, monkeypatch):
+    (queries / "target_vs_actual.sql").write_text(SQL_TARGET, encoding="utf-8")
+    builder._prepare.cache_clear()
+    state = SimpleNamespace(
+        targets=bc.parse_targets({"defaults": {"month": {"revenue": 300000000}}}),   # 10 triệu/ngày
+        thresholds=bc.parse_thresholds({"achievement_vs_target": {"revenue": {"warn_below_pct": 90}}}),
+    )
+    monkeypatch.setattr(bc, "load_targets", lambda: state.targets)
+    monkeypatch.setattr(bc, "load_thresholds", lambda: state.thresholds)
+    return state
+
+
+def test_target_section_reads_targets_from_yaml(target_env):
+    rep = build(FakePool(TARGET_DATA), ["target_vs_actual"])
+    t = rep.text
+    assert "• Doanh thu hôm qua: 9.000.000 ₫ / mục tiêu 10.000.000 ₫ → đạt 90,0%" in t
+    assert "• Doanh thu luỹ kế 01/11–05/11: 40.000.000 ₫ / mục tiêu 50.000.000 ₫ → đạt 80,0% [CẢNH BÁO]" in t
+    assert "Mục tiêu cả tháng 11/2026: 300.000.000 ₫, còn thiếu 260.000.000 ₫" in t
+    assert "Số đơn" not in t                      # chưa đặt mục tiêu số đơn: không hiện
+    assert rep.ok == ("target_vs_actual",)
+
+
+def test_target_section_without_targets(target_env):
+    target_env.targets = bc.Targets()
+    rep = build(FakePool(TARGET_DATA), ["target_vs_actual"])
+    assert "Chưa đặt mục tiêu cho tháng này" in rep.text and rep.ok == ("target_vs_actual",)
+
+
+def test_target_override_for_month(target_env):
+    target_env.targets = bc.parse_targets({"defaults": {"month": {"revenue": 300000000}},
+                                           "overrides": {"2026-11": {"revenue": 600000000}}})
+    rep = build(FakePool(TARGET_DATA), ["target_vs_actual"])
+    assert "mục tiêu 20.000.000 ₫ → đạt 45,0%" in rep.text and "Mục tiêu cả tháng 11/2026: 600.000.000 ₫" in rep.text

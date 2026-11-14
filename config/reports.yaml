@@ -8,8 +8,6 @@
 
 # Múi giờ để tính "giờ hẹn" và "ngày đã gửi" (lưu ở bảng agent_state.report_state).
 timezone: "Asia/Ho_Chi_Minh"
-
-# Giờ gửi mặc định (giờ Việt Nam) cho manager không khai báo send_time riêng.
 default_send_time: "07:00"
 
 # Nếu service bật lại muộn hơn giờ hẹn quá số phút này thì bỏ qua báo cáo hôm đó
@@ -31,15 +29,13 @@ footer: ""
 # Các mục báo cáo dùng được (tên file trong app/agent/queries/):
 #   kpi_summary, revenue_by_day, revenue_by_channel, top_products, bottom_products,
 #   customers_new_vs_returning, target_vs_actual
-# target_vs_actual cần bảng dwh.sales_targets (xem đầu file SQL); chưa có bảng thì đừng dùng mục này.
+# target_vs_actual: mục tiêu lấy từ config/targets.yaml (không cần bảng SQL); chưa đặt mục tiêu thì mục này chỉ báo "chưa đặt".
 default_sections: [kpi_summary, revenue_by_channel, top_products]
 
 # Danh sách manager nhận báo cáo: khoá là Telegram ID (lấy bằng /myid).
 # Người trong danh sách này phải còn tồn tại và có role manager trong /users.
 # Mục nào manager không đủ quyền xem sẽ bị bỏ khỏi báo cáo và ghi audit.
 #
-# KHÔNG ghi Telegram ID thật vào file này (file nằm trong git). Trên máy chủ:
-#   1. chép file này thành config/reports.local.yaml (đã có trong .gitignore, không bị đẩy lên GitHub)
 managers: {}
 # managers:
   # 123456789:

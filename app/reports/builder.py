@@ -24,6 +24,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
+from app.agent import business_config
 from app.agent.periods import Period, comparison_periods, resolve_period, today_local
 from app.agent.permissions import can_access
 from app.db.guard import CheckedQuery, UnsafeSQLError, check_template
@@ -45,6 +46,7 @@ class Section:
     title: str
     sql_file: str
     top_n: int = 10  # kết quả nhiều dòng thì chỉ hiện từng này dòng đầu
+    kind: str = "sql"  # "sql": hiện kết quả SQL | "target": ghép số thực tế với mục tiêu trong targets.yaml
 
 
 # Khoá = tên dùng trong reports.yaml
@@ -55,7 +57,7 @@ SECTIONS: dict[str, Section] = {
     "top_products": Section("Sản phẩm bán chạy", "top_products.sql", top_n=5),
     "bottom_products": Section("Sản phẩm bán chậm", "bottom_products.sql", top_n=5),
     "customers_new_vs_returning": Section("Khách mới và khách quay lại", "customers_new_vs_returning.sql"),
-    "target_vs_actual": Section("Thực tế so với mục tiêu", "target_vs_actual.sql"),
+    "target_vs_actual": Section("Thực tế so với mục tiêu", "target_vs_actual.sql", kind="target"),
 }
 
 # Tên cột -> nhãn tiếng Việt. Cột không có ở đây thì dùng tên cột (bỏ dấu gạch dưới).
@@ -218,6 +220,56 @@ async def _run_section(pool, sql: str, section: Section, period: Period) -> list
     return _render_single(cur, comparisons)
 
 
+# ---------------------------------------------------------------- thực tế so với mục tiêu
+# Mục tiêu đọc từ config/targets.yaml (business_config, tự nạp lại khi file đổi, không cần restart),
+# KHÔNG đọc từ database. File SQL chỉ trả số thực tế; tên cột = tên chỉ số trong targets.yaml.
+# Hiện 2 mốc: ngày hôm qua và luỹ kế từ đầu tháng (luỹ kế ổn định hơn, ít nhiễu theo ngày).
+# Cờ cảnh báo lấy theo luỹ kế tháng, ngưỡng trong config/thresholds.yaml (achievement_vs_target).
+
+_FLAG_TEXT = {"warn": " [CẢNH BÁO]", "critical": " [NGHIÊM TRỌNG]"}
+
+
+def _target_line(metric: str, name: str, actual, target: float, flag: str = "") -> str:
+    head = f"• {_label(metric)} {name}: {fmt_value(actual, metric)} / mục tiêu {fmt_value(target, metric)}"
+    if not _is_number(actual) or target <= 0:
+        return head
+    return head + f" → đạt {_vn(float(actual) / target * 100, 1)}%" + flag
+
+
+async def _run_target_section(pool, sql: str, period: Period) -> list[str]:
+    targets = business_config.load_targets()
+    thresholds = business_config.load_thresholds()
+    month_start = period.end.replace(day=1)
+    mtd = Period(month_start, period.end, "range", f"luỹ kế {month_start:%d/%m}–{period.end:%d/%m}")
+    same = mtd.start == period.start  # hôm qua là ngày 1: luỹ kế trùng với ngày
+
+    day_res = await _fetch(pool, sql, period)
+    mtd_res = day_res if same else await _fetch(pool, sql, mtd)
+
+    def value(res: Result, col: str):
+        return res.rows[0][res.columns.index(col)] if res.rows and col in res.columns else None
+
+    lines = []
+    for metric in day_res.columns:
+        month_target = targets.monthly(metric, period.end.year, period.end.month)
+        if month_target is None:
+            continue  # chưa đặt mục tiêu cho chỉ số này
+        t_day = targets.for_period(metric, period.start, period.end)
+        t_mtd = targets.for_period(metric, mtd.start, mtd.end)
+        a_mtd = value(mtd_res, metric)
+        ach = float(a_mtd) / t_mtd * 100 if _is_number(a_mtd) and t_mtd else None
+        flag = _FLAG_TEXT.get(thresholds.achievement_flag(metric, ach).level, "")
+        if not same and t_day is not None:
+            lines.append(_target_line(metric, "hôm qua", value(day_res, metric), t_day))
+        if t_mtd is not None:
+            lines.append(_target_line(metric, mtd.label, a_mtd, t_mtd, flag))
+        if metric in business_config.ADDITIVE_METRICS:
+            left = month_target - float(a_mtd) if _is_number(a_mtd) else None
+            tail = f", còn thiếu {fmt_value(left, metric)}" if left is not None and left > 0 else ""
+            lines.append(f"  Mục tiêu cả tháng {period.end:%m/%Y}: {fmt_value(month_target, metric)}{tail}")
+    return lines or ["• Chưa đặt mục tiêu cho tháng này (config/targets.yaml)."]
+
+
 # ---------------------------------------------------------------- nhận xét (tuỳ chọn, v2)
 
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*%?")
@@ -300,7 +352,10 @@ async def build_report(
             denied.append(key)
             continue
         try:
-            lines = await _run_section(pool, checked.sql, section, period)
+            if section.kind == "target":
+                lines = await _run_target_section(pool, checked.sql, period)
+            else:
+                lines = await _run_section(pool, checked.sql, section, period)
         except Exception:
             logger.exception("Chạy mục '%s' lỗi", key)
             failed.append(key)
