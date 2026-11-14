@@ -6,7 +6,8 @@ __pycache__/
 .venv/
 venv/
 data/
-static/
+static/*
+!static/chart.umd.min.js
 sql/
 config/users_seed.yaml
 config/reports.local.yaml
