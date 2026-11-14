@@ -57,8 +57,20 @@ TEMPLATE = r"""<!DOCTYPE html>
   .side { flex: none; width: 190px; position: sticky; top: 20px; }
   .side[hidden] { display: none; }
   .content { flex: 1 1 0; min-width: 0; }
-  .top { display: flex; justify-content: space-between; align-items: center; gap: 12px 24px; flex-wrap: wrap; margin-bottom: 16px; }
-  header { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  /* Tiêu đề bên trái, bộ lọc bên phải trên cùng một hàng. Tiêu đề tự xuống dòng để nhường chỗ cho
+     bộ lọc; màn hẹp (dưới 1100px) mới đưa bộ lọc xuống dưới tiêu đề. */
+  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 24px; flex-wrap: nowrap; margin-bottom: 16px; }
+  header { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1 0 340px; }
+  #filterSlot { flex: 0 1 auto; min-width: 0; }
+  #filterSlot .filters { justify-content: flex-end; gap: 8px; }
+  #filterSlot .f { padding: 5px 8px 7px; }
+  #filterSlot .f select { min-width: 112px; }
+  #filterSlot .f .dates input { width: 122px; }
+  @media (max-width: 1100px) {
+    .top { flex-wrap: wrap; }
+    header, #filterSlot { flex: 1 1 100%; }
+    #filterSlot .filters { justify-content: flex-start; }
+  }
   header img { height: 56px; width: auto; flex: none; }
   header img[hidden] { display: none; }
   @media (max-width: 820px) {
@@ -804,7 +816,7 @@ TEMPLATE = r"""<!DOCTYPE html>
                callback: hz ? truncLabel : wrapLabel,
                font: { weight: hz ? '600' : '400', size: many ? 10 : 11 } } };
     var valAxis = { stacked: m.stacked, beginAtZero: fromZero, border: { display: false },
-      grid: { color: line, drawTicks: false },
+      grid: { display: false },   // bỏ lưới gióng ngang cho thoáng; giá trị đã ghi trên cột/điểm
       ticks: { color: muted, padding: 6, callback: function (v) { return F.axis(kind, v); } } };
     if (hz) { valAxis.display = false; }
     if (fromZero) {
