@@ -180,8 +180,8 @@ def db(monkeypatch):
 
 # ================================================================ /start, /help theo role
 @pytest.mark.parametrize("tid,report,grant,admin", [
-    (BOSS, False, True, True),        # boss chủ: cấp quyền + quản trị, không có báo cáo sáng
-    (BOSS2, False, True, False),      # boss thường: chỉ cấp quyền
+    (BOSS, True, True, True),         # boss chủ: báo cáo sáng + cấp quyền + quản trị
+    (BOSS2, True, True, False),       # boss thường: báo cáo sáng + cấp quyền
     (MGR, True, True, False),         # manager: báo cáo sáng + cấp quyền
     (MGR_ADMIN, True, True, True),    # manager admin: đủ cả ba
     (STAFF_A, False, False, False),   # staff: chỉ phần chung
@@ -599,14 +599,14 @@ def test_removeuser_when_purge_fails(db):
     lambda m, u: h.cmd_baocao_gio(m, cmd("07:30"), u, None),
     lambda m, u: h.cmd_reply(m, cmd("doanh thu theo kênh"), u, None, None),
 ])
-@pytest.mark.parametrize("tid", [BOSS, BOSS2, STAFF_A])
+@pytest.mark.parametrize("tid", [STAFF_A])
 def test_report_commands_are_manager_only(db, call, tid):
     m = FakeMessage()
     run(call(m, as_user(tid)))
     assert m.last == h.MSG_NOT_MANAGER and db.asked == []
 
 
-@pytest.mark.parametrize("tid", [MGR, MGR_ADMIN])
+@pytest.mark.parametrize("tid", [MGR, MGR_ADMIN, BOSS, BOSS2])
 def test_report_commands_for_manager_without_config(db, tid):
     # reports.yaml chưa có: manager được báo rõ, không bị nhắc "không dành cho bạn"
     m = FakeMessage()

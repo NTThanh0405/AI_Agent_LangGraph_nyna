@@ -73,7 +73,7 @@ def run(coro):
 # ---- /reply
 def test_reply_non_manager_is_refused(env):
     m = FakeMessage()
-    run(h.cmd_reply(m, cmd(), user("boss"), None, None))
+    run(h.cmd_reply(m, cmd(), user("staff"), None, None))
     assert m.last == h.MSG_NOT_MANAGER and env.switched == [] and env.asked == []
 
 
@@ -161,7 +161,7 @@ def test_resume_refused_if_admin_disabled(env):
 
 def test_pause_by_non_manager_or_unregistered(env):
     m = FakeMessage()
-    run(h.cmd_baocao_tat(m, user("boss"), None))
+    run(h.cmd_baocao_tat(m, user("staff"), None))
     assert env.paused == [] and m.last == h.MSG_NOT_MANAGER
     env.cfg = make_cfg(manager=False)
     run(h.cmd_baocao_tat(m, user(), None))
@@ -212,7 +212,7 @@ def test_help_shows_report_commands_only_to_managers(env):
     m = FakeMessage()
     run(h.cmd_help(m, user("manager")))
     assert "/baocao" in m.last and "/reply" in m.last and "/baocao_gio" not in m.last
-    run(h.cmd_help(m, user("boss")))
+    run(h.cmd_help(m, user("staff")))
     assert "/baocao" not in m.last and "/reply" not in m.last
     env.cfg = make_cfg(can_change=True)
     run(h.cmd_help(m, user("manager")))
