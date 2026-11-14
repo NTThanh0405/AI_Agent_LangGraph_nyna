@@ -36,7 +36,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #F2F2F2; --panel: #FFFFFF; --ink: #1E1E1E; --muted: #666B69; --line: #E1E3E1; --head: #F1F1F1;
+    --bg: #F5F6F8; --panel: #FFFFFF; --ink: #1B1F24; --muted: #667085; --line: #E6E8EC; --head: #F5F6F8;
     --good: #1B7F3B; --bad: #C8202B;
     --c1: #1F6F6B; --c2: #9A5B35; --c3: #D6A23A; --c4: #5C6F8A; --c5: #B24D69; --c6: #7E8F3F;
   }
@@ -152,6 +152,23 @@ TEMPLATE = r"""<!DOCTYPE html>
   table.heat td.rh, table.heat th:first-child { text-align: left; padding-left: 8px; padding-right: 6px; }
   .empty { margin: 0; color: var(--muted); }
   .note { margin: 8px 0 0; color: var(--muted); font-size: .75rem; }
+  /* ---- Tinh chỉnh giao diện: nền dịu, thẻ bo tròn có bóng nhẹ, bộ lọc gom một khung, KPI rõ thứ bậc ---- */
+  h1 { font-size: clamp(1.2rem, 2.2vw, 1.5rem); }
+  .card, .panel { border-radius: 12px; box-shadow: 0 1px 2px rgba(16, 24, 40, .05); }
+  .card { padding: 16px 18px; border-top: 3px solid var(--brand, var(--c1)); }
+  .card .l { color: var(--muted); font-size: .78rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .card .v { font-size: 1.9rem; margin: 2px 0 4px; }
+  .card .d { display: inline-block; padding: 2px 8px; border-radius: 999px; }
+  .card .d.good { background: color-mix(in srgb, var(--good) 12%, transparent); }
+  .card .d.bad { background: color-mix(in srgb, var(--bad) 10%, transparent); }
+  .card .d.flat { padding-left: 0; }
+  .panel { padding: 16px 18px; }
+  .tab { border-radius: 10px; }
+  .filters { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 8px 10px;
+             box-shadow: 0 1px 2px rgba(16, 24, 40, .05); gap: 4px 14px; }
+  #filterSlot .f, .f { background: transparent; border: 0; padding: 0; }
+  .f select, .f input { border-radius: 6px; background: var(--bg); }
+  .reset { border: 0; background: transparent; color: var(--brand, var(--c1)); font-weight: 600; padding: 6px 4px; }
   @media print {
     body { background: #fff; }
     .side, #filterSlot, .dl { display: none !important; }
@@ -937,12 +954,6 @@ TEMPLATE = r"""<!DOCTYPE html>
       var head = el('div', 'ph');
       head.appendChild(el('h2', '', c.title));
       var p = { c: c, body: el('div'), csv: null, chart: null };
-      var btn = el('button', 'dl', 'CSV');
-      btn.type = 'button';
-      btn.title = 'Tải số liệu đang xem của mục này';
-      btn.setAttribute('aria-label', 'Tải CSV: ' + c.title);
-      btn.addEventListener('click', function () { if (p.csv) downloadCsv(c.title, p.csv.columns, p.csv.rows); });
-      head.appendChild(btn);
       panel.appendChild(head); panel.appendChild(p.body);
       view.grid.appendChild(panel);
       return p;
