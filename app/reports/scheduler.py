@@ -22,7 +22,6 @@ from app.agent.sessions import drop_session, register_report_thread, report_thre
 from app.audit import log_turn
 from app.reports.builder import build_report, split_text
 from app.reports.subscriptions import (
-    REPORT_ROLE,
     REPORT_ROLES,
     ConfigStore,
     ReportConfig,
@@ -125,7 +124,7 @@ async def _deliver(bot, graph, state_pool, get_data_pool, cfg: ReportConfig, due
     user = await get_allowed_user(state_pool, uid)
     if user is None or (user.role or "").lower() not in REPORT_ROLES:
         logger.warning("Bỏ qua báo cáo cho %s: không còn trong danh sách hoặc không phải %s", uid, "/".join(sorted(REPORT_ROLES)))
-        await _give_up(state_pool, uid, REPORT_ROLE, today, "không còn trong danh sách hoặc không phải manager/boss")
+        await _give_up(state_pool, uid, user.role if user else None, today, "không còn trong danh sách hoặc không phải manager/boss")
         return False
 
     commentary_fn = None
@@ -185,9 +184,10 @@ async def _skip_late(state_pool, cfg: ReportConfig, states, now: datetime) -> in
     nhờ cột last_skipped_on. Trả về số người bị bỏ lỡ."""
     n = 0
     for manager in late_reports(cfg, states, now):
+        user = await get_allowed_user(state_pool, manager.user_id)
         await mark_skipped(state_pool, manager.user_id, now.date())
         await _audit(
-            state_pool, manager.user_id, REPORT_ROLES, "skipped_late",
+            state_pool, manager.user_id, user.role if user else None, "skipped_late",
             f"quá {cfg.max_delay_minutes} phút sau giờ hẹn nên bỏ qua báo cáo ngày {now:%d/%m}",
         )
         logger.warning("Bỏ lỡ báo cáo của user_id=%s (quá %s phút sau giờ hẹn)", manager.user_id, cfg.max_delay_minutes)
