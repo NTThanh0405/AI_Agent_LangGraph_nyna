@@ -35,8 +35,8 @@ def _default_config_path() -> Path:
 
 CONFIG_PATH = _default_config_path()
 
-
-REPORT_ROLE = "manager"  # chỉ role này nhận báo cáo tự động và được dùng /reply, /baocao*
+REPORT_ROLES = frozenset({"manager", "boss"})
+REPORT_ROLE = "manager"  
 
 
 class ConfigError(ValueError):

@@ -42,10 +42,16 @@ default_sections: [kpi_summary, revenue_by_channel, top_products]
 #   1. chép file này thành config/reports.local.yaml (đã có trong .gitignore, không bị đẩy lên GitHub)
 #managers: {}
 managers:
-  7292953431:                      # <-- Telegram ID thật của manager (/myid)
+  XX:
+    name: "thanh"
+    send_time: "07:00"
+    sections: [kpi_summary, revenue_by_channel, top_products]
+    enabled: true
+
+  XX:                      
     name: "CEO Thúy Anh"
     send_time: "07:00"
-    sections: [kpi_summary, revenue_by_channel]
+    sections: [kpi_summary, revenue_by_channel, top_products]
     enabled: true
   # 222222222:
     # name: "Trần Thị B"

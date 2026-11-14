@@ -48,7 +48,7 @@ from app.audit import log_turn
 from app.config import get_settings
 from app.reports.builder import SECTIONS
 from app.reports.subscriptions import (
-    REPORT_ROLE,
+    REPORT_ROLES,
     effective_send_time,
     get_store,
     load_states,
@@ -148,7 +148,7 @@ MSG_NOT_REGISTERED = "Bạn chưa được đăng ký nhận báo cáo tự đ�
 
 
 def _is_report_user(user: AllowedUser) -> bool:
-    return (user.role or "").lower() == REPORT_ROLE
+    return (user.role or "").lower() in REPORT_ROLES
 
 
 GRANTOR_ROLES = {"boss", "manager"}  # role được cấp/thu hồi quyền xem bảng cho staff

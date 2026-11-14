@@ -22,7 +22,7 @@ from app.agent.sessions import drop_session, register_report_thread, report_thre
 from app.audit import log_turn
 from app.reports.builder import build_report, split_text
 from app.reports.subscriptions import (
-    REPORT_ROLE,
+    REPORT_ROLES,
     ConfigStore,
     ReportConfig,
     due_reports,
@@ -122,9 +122,9 @@ async def _deliver(bot, graph, state_pool, get_data_pool, cfg: ReportConfig, due
     uid = manager.user_id
 
     user = await get_allowed_user(state_pool, uid)
-    if user is None or user.role != REPORT_ROLE:
-        logger.warning("Bỏ qua báo cáo cho %s: không còn trong danh sách hoặc không phải %s", uid, REPORT_ROLE)
-        await _give_up(state_pool, uid, REPORT_ROLE, today, "không còn trong danh sách hoặc không phải manager")
+    if user is None or (user.role or "").lower() not in REPORT_ROLES:
+        logger.warning("Bỏ qua báo cáo cho %s: không còn trong danh sách hoặc không phải %s", uid, "/".join(sorted(REPORT_ROLES)))
+        await _give_up(state_pool, uid, REPORT_ROLES, today, "không còn trong danh sách hoặc không phải manager/boss")
         return False
 
     commentary_fn = None
