@@ -284,6 +284,28 @@ def test_shortcut_prompts_mention_period():
     assert "dashboard" in h.PROMPT_DASHBOARD.lower()
 
 
+
+@pytest.mark.parametrize("args,expected", [
+    (None, h.PROMPT_DASHBOARD),
+    ("   ", h.PROMPT_DASHBOARD),
+    ("doanh thu tuần trước", "Tạo dashboard doanh thu tuần trước"),
+    ("  doanh   thu\n tháng 10 ", "Tạo dashboard doanh thu tháng 10"),
+    ("tạo dashboard cửa hàng từ 1/11 đến 7/11", "tạo dashboard cửa hàng từ 1/11 đến 7/11"),
+])
+def test_dashboard_prompt_keeps_user_request(args, expected):
+    assert h.dashboard_prompt(args) == expected
+
+
+def test_dashboard_command_passes_text_after_command(db):
+    # trước đây phần chữ sau /dashboard bị bỏ, luôn ra "tuần này"
+    m = FakeMessage()
+    run(h.cmd_dashboard(m, as_user(BOSS), None, None, SimpleNamespace(args="doanh thu tuần trước")))
+    assert db.asked == [(BOSS, "Tạo dashboard doanh thu tuần trước")]
+
+
+def test_dashboard_default_prompt_is_last_full_week():
+    assert "tuần trước" in h.PROMPT_DASHBOARD and "tuần này" not in h.PROMPT_DASHBOARD
+
 # ================================================================ /capquyen (theo khối)
 @pytest.mark.parametrize("tid", [BOSS, BOSS2, MGR, MGR_ADMIN])
 def test_capquyen_coffee_with_hours(db, tid):

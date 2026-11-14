@@ -117,7 +117,7 @@ async def test_one_page_with_period(env):
     out = await _call({"pages": ["tong_quan"], "period_start": "2026-11-02", "period_end": "2026-11-08"})
     assert "https://dash.test/" in out and "02/11/2026–08/11/2026" in out and "26/10/2026–01/11/2026" in out
     html = _html(env)
-    assert "Tổng quan hiệu suất FoodApp" in html
+    assert "Tổng quan doanh thu NYNA" in html
     assert "</script><script>alert(1)" not in html          # dữ liệu không phá được thẻ script
 
 

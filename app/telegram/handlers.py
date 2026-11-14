@@ -90,7 +90,7 @@ HELP_TEXT = (
     "Lệnh nhanh:\n"
     "/tuan - tình hình kinh doanh tuần này\n"
     "/thang - tình hình kinh doanh tháng này\n"
-    "/dashboard - dashboard tổng quan tuần này\n"
+    "/dashboard - dashboard tổng quan tuần trọn vẹn gần nhất; ghi thêm yêu cầu sau lệnh, vd: /dashboard doanh thu tuần trước\n"
     "/new - bắt đầu cuộc trò chuyện mới\n"
     "/sessions - xem, chuyển hoặc xoá các cuộc trò chuyện\n"
     "/quyen - xem bạn được xem những khối dữ liệu nào\n"
@@ -139,7 +139,9 @@ PROMPT_MONTH = (
     "Tình hình kinh doanh tháng này thế nào? Cho tôi các số liệu chính, so với tháng trước, "
     "và đề xuất."
 )
-PROMPT_DASHBOARD = "Tạo dashboard tổng quan tuần này."
+# /dashboard không kèm gì: tuần trọn vẹn gần nhất (khớp kỳ mặc định của create_dashboard).
+# Có chữ sau lệnh (vd "/dashboard doanh thu tuần trước") thì dùng đúng yêu cầu đó.
+PROMPT_DASHBOARD = "Tạo dashboard tổng quan tuần trước."
 
 _TAG = {OWNER: " (chủ)", ADMIN: " (admin)", STAFF: ""}
 
@@ -358,8 +360,18 @@ async def cmd_month(message: Message, user: AllowedUser, graph, pool) -> None:
     await _shortcut(message, user, graph, pool, PROMPT_MONTH)
 
 
-async def cmd_dashboard(message: Message, user: AllowedUser, graph, pool) -> None:
-    await _shortcut(message, user, graph, pool, PROMPT_DASHBOARD, needs_db=True)
+def dashboard_prompt(args: str | None) -> str:
+    """Câu gửi cho agent từ lệnh /dashboard: giữ nguyên yêu cầu người dùng gõ sau lệnh."""
+    text = " ".join((args or "").split())[:500]
+    if not text:
+        return PROMPT_DASHBOARD
+    return text if "dashboard" in text.lower() else f"Tạo dashboard {text}"
+
+
+async def cmd_dashboard(message: Message, user: AllowedUser, graph, pool,
+                        command: CommandObject | None = None) -> None:
+    await _shortcut(message, user, graph, pool, dashboard_prompt(command.args if command else None),
+                    needs_db=True)
 
 
 # ---------------------------------------------------------------- báo cáo sáng (chỉ manager)

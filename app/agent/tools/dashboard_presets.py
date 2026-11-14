@@ -2,7 +2,7 @@
 # Bố cục mẫu (preset) và bảng màu (theme) của dashboard.
 #
 # Báo cáo NYNA gồm 5 trang theo mẫu (REPORT_PAGES):
-#   tong_quan  - Tổng quan hiệu suất FoodApp      cua_hang - Cửa hàng
+#   tong_quan  - Tổng quan doanh thu NYNA      cua_hang - Cửa hàng
 #   nen_tang   - Nền tảng                         san_pham - Sản phẩm
 #   hanh_vi    - Hành vi khách hàng
 # Thêm 2 trang bổ sung: hoi_vien (khách hàng & hội viên), don_online (đơn online & đối tác).
@@ -319,9 +319,9 @@ PRESETS = {
         "theme": "default", "filters": [], "kpis": [], "charts": [], "sql_template": None,
     },
 
-    # ---------------- 1. Tổng quan hiệu suất FoodApp ----------------
+    # ---------------- 1. Tổng quan doanh thu NYNA ----------------
     "tong_quan": {
-        "name": "Tổng quan", "title": "Tổng quan hiệu suất FoodApp",
+        "name": "Tổng quan", "title": "Tổng quan doanh thu NYNA",
         "description": "4 KPI (Doanh thu Net, Số đơn, AOV, Số món/đơn) có so sánh kỳ trước; doanh thu theo "
                        "ngày (đường), theo cửa hàng, nền tảng, giờ (cột).",
         "theme": "nyna",

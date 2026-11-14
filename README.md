@@ -208,7 +208,7 @@ Khai báo trong `app/agent/tools/dashboard_presets.py`. Mỗi trang = bộ lọc
 
 | Trang (preset) | Nội dung |
 |---|---|
-| `tong_quan` — Tổng quan hiệu suất FoodApp | 4 KPI (Doanh thu Net, Số đơn, AOV, Số món/đơn) so với kỳ trước; doanh thu theo ngày, cửa hàng, nền tảng, giờ |
+| `tong_quan` — Tổng quan doanh thu NYNA | 4 KPI (Doanh thu Net, Số đơn, AOV, Số món/đơn) so với kỳ trước; doanh thu theo ngày, cửa hàng, nền tảng, giờ |
 | `cua_hang` — Cửa hàng | Số đơn, AOV, Số món/đơn theo cửa hàng; bảng chỉ số có ± kỳ trước và dòng Tổng |
 | `nen_tang` — Nền tảng | Bảng chỉ số theo nền tảng (tỉ trọng); doanh thu theo tuần của từng nền tảng (4 tuần); bảng chéo cửa hàng × nền tảng |
 | `san_pham` — Sản phẩm | Top 10 món bán chạy và bán thấp nhất; doanh thu theo nhóm món; bảng chéo nhóm món × nền tảng |

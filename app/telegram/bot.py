@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 COMMANDS = [
     BotCommand(command="tuan", description="Tình hình kinh doanh tuần này"),
     BotCommand(command="thang", description="Tình hình kinh doanh tháng này"),
-    BotCommand(command="dashboard", description="Dashboard doanh thu tuần này"),
+    BotCommand(command="dashboard", description="Dashboard, vd: /dashboard doanh thu tuần trước"),
     BotCommand(command="new", description="Bắt đầu cuộc trò chuyện mới"),
     BotCommand(command="myid", description="Xem Telegram ID của bạn"),
     BotCommand(command="help", description="Xem hướng dẫn"),
