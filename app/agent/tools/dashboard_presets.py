@@ -303,7 +303,7 @@ ORDER BY 2"""
 #            agg?, denom?, compare (true | [cột]), color_by? (bar: chồng; line: mỗi nhóm 1 đường),
 #            series_limit?, stacked?, sort: asc|desc, sort_by? (cột dùng để xếp), limit? (top N),
 #            others?, horizontal?, hide_empty?, x_divisor? {tiền tố: số chia}, format?,
-#            begin_at_zero?, labels?, legend?, height?, scope: 'all' (bỏ qua lọc ngày, dùng cả lịch sử),
+#            labels?, legend? (trục giá trị luôn bắt đầu từ 0), height?, scope: 'all' (bỏ qua lọc ngày, dùng cả lịch sử),
 #            where? {cột: giá trị} (lọc cố định riêng khối), null_as_zero? (khi xếp, nhãn không có số = 0)}
 #  table  : {x, x_label?, columns: [{label, column, agg?, denom?, format, delta?, delta_label?,
 #            share? (tỉ trọng trên tổng), good_when?}], total?, sort?, sort_by?, limit?}
@@ -370,7 +370,7 @@ PRESETS = {
              "sort_by": "doanh_thu", "span": 6},
             {"title": "Số món/đơn theo cửa hàng", "type": "bar",
              "x": "cua_hang", "y": ["so_mon"], **_AOV, "compare": True, "sort": "desc",
-             "sort_by": "doanh_thu", "format": "decimal", "begin_at_zero": False, "span": 6},
+             "sort_by": "doanh_thu", "format": "decimal", "span": 6},
             {"title": "Chỉ số cửa hàng", "type": "table", "x": "cua_hang", "x_label": "Tên cửa hàng",
              "columns": [
                  {"label": "Số đơn", "column": "so_don", "format": "number", "delta": True},
