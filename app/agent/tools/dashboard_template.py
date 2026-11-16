@@ -811,9 +811,18 @@ TEMPLATE = r"""<!DOCTYPE html>
         maxBarThickness: hz ? 14 : 34, categoryPercentage: 0.75, barPercentage: 0.9,
         noLabel: !!s.prev, labelColor: ink };
     });
+    // Nhãn trục dọc của cột ngang: tên dài xuống dòng theo từ (tối đa 2 dòng, ~16 ký tự/dòng)
+    // để không bị cắt mất đầu chữ khi biểu đồ hẹp.
     function truncLabel(v) {
       var l = String(this.getLabelForValue(v));
-      return l.length > 24 ? l.slice(0, 23) + '…' : l;
+      if (l.length <= 16) return l;
+      var lines = [], cur = '';
+      l.split(' ').forEach(function (w) {
+        if (cur && (cur + ' ' + w).length > 16) { lines.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w;
+      });
+      if (cur) lines.push(cur);
+      lines = lines.map(function (s) { return s.length > 16 ? s.slice(0, 15) + '…' : s; });
+      return lines.length > 2 ? [lines[0], (lines.slice(1).join(' ')).slice(0, 15) + '…'] : lines;
     }
     // Nhãn dài trên trục ngang: xuống dòng theo từ thay vì xoay nghiêng
     function wrapLabel(v) {
