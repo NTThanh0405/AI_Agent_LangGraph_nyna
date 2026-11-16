@@ -312,3 +312,16 @@ def test_db_end_to_end_staff_permission_lifecycle():
         assert not await perm.can_access_user("staff", "test-1", TABLE)
 
     run(_with_pool(body))
+
+
+def test_base_dim_tables_blocked_views_allowed():
+    """dim_channel / dim_item bị chặn với mọi vai trò; AI phải dùng view v_channel / v_item."""
+    from app.agent.permissions import PermissionDenied, can_access, ensure_access
+    import pytest
+    for role in ("boss", "manager"):
+        assert not can_access(role, "dwh.dim_channel")
+        assert not can_access(role, "dwh.dim_item")
+        assert can_access(role, "dwh.v_channel")
+        assert can_access(role, "dwh.v_item")
+        with pytest.raises(PermissionDenied):
+            ensure_access(role, ["dwh.fact_sales", "dwh.dim_item"])

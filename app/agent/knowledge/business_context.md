@@ -6,7 +6,8 @@
 
 ## 1. Doanh nghiệp
 - Chuỗi đồ uống NYNA Coffee, bán tại cửa hàng và qua app giao đồ ăn.
-- Danh sách cửa hàng, kênh bán, món, nhóm món thay đổi theo thời gian: luôn lấy từ `dim_store`, `dim_channel`, `dim_item`, không dựa vào danh sách ghi tay.
+- Danh sách cửa hàng, kênh bán, món, nhóm món thay đổi theo thời gian: luôn lấy từ `dim_store`, `v_channel`, `v_item`, không dựa vào danh sách ghi tay.
+- Tên kênh bán / nguồn đơn LUÔN lấy từ view `dwh.v_channel`; tên món và tên nhóm món (`item_type_name`) LUÔN lấy từ view `dwh.v_item`. Hai bảng gốc `dim_channel`, `dim_item` thiếu tên và agent không được truy vấn.
 
 ## 2. Nguồn dữ liệu
 - Dữ liệu bán hàng từ hệ thống iPOS, đã gộp vào kho dữ liệu `dwh` (mô hình sao: bảng `dim_*` và `fact_*`). Agent chỉ đọc (SELECT), không ghi.
@@ -17,10 +18,11 @@
 | Nhu cầu | Bảng | Ghi chú |
 |---|---|---|
 | Doanh thu, số bill, khách | `dwh.fact_sales` | Mỗi dòng là một bill; đã gồm cả đơn online và bill HUB |
-| Doanh thu theo món | `dwh.fact_sale_items` (+ `dim_item`) | Lọc ngày và bill hợp lệ phải JOIN về `fact_sales`. Tổng tiền theo món KHÁC doanh thu bill (xem glossary) |
+| Doanh thu theo món | `dwh.fact_sale_items` (+ `v_item`) | Lọc ngày và bill hợp lệ phải JOIN về `fact_sales`. Tổng tiền theo món KHÁC doanh thu bill (xem glossary) |
 | Thanh toán | `dwh.fact_sale_payments` | Một bill có thể có nhiều dòng thanh toán |
 | Trạng thái đơn online, đối soát | `dwh.fact_online_orders`, `dwh.fact_hub_bills` | KHÔNG dùng để tính doanh thu; chỉ xem vận hành (huỷ đơn, thời gian xác nhận) |
-| Kênh, cửa hàng, nhân viên, khuyến mãi | `dim_channel`, `dim_store`, `dim_employee`, `dim_promotion` | JOIN qua `*_key` |
+| Kênh, cửa hàng, nhân viên, khuyến mãi | `v_channel`, `dim_store`, `dim_employee`, `dim_promotion` | JOIN qua `*_key` |
+| Món, nhóm món | `v_item` | JOIN qua `item_key`; tên nhóm món ở cột `item_type_name` |
 | Hội viên, voucher, đặt chỗ | `fact_member_vouchers`, `fact_membership_transactions`, `fact_membership_type_changes`, `fact_bookings`, `dim_voucher_campaign` | Voucher và booking chưa có dữ liệu mẫu, kiểm tra có dòng trước khi trả lời |
 
 ## 4. Cách tính số liệu
@@ -39,9 +41,10 @@ Dùng đúng định nghĩa trong `glossary.md`, không tự đổi công thức
 |---|---|
 | doanh số, doanh thu, tiền bán được | Doanh thu (glossary) |
 | đơn, bill, hoá đơn | Số bill |
-| app, nền tảng, kênh, Grab/Shopee | Kênh bán (`dim_channel`) |
+| app, nền tảng, kênh, Grab/Shopee | Kênh bán (`v_channel`) |
 | quán, chi nhánh, cơ sở | Cửa hàng (`dim_store`) |
-| món, sản phẩm, đồ uống | Món (`dim_item`) |
+| món, sản phẩm, đồ uống | Món (`v_item`) |
+| nhóm món, danh mục, loại đồ uống | Nhóm món (`v_item.item_type_name`) |
 | khách quen | Khách quay lại |
 - Câu hỏi có thể hiểu theo nhiều cách (ví dụ "bán được bao nhiêu" là tiền hay số ly): chọn cách hợp lý nhất, nói rõ cách hiểu, gợi ý cách còn lại.
 
@@ -82,7 +85,6 @@ Xác nhận xong mục nào thì chuyển câu trả lời lên phần trên (v�
 **Về doanh nghiệp** (gợi ý suy ra từ mẫu dashboard, cần xác nhận):
 - Số cửa hàng, khu vực: mẫu có 6 cửa hàng (Nguyên Hồng, Minh Khai, Nguyễn Khắc Cần, Nguyễn Trãi, Trần Hưng Đạo, Nguỵ Như Kon Tum)?
 - Kênh bán: tại quầy + GrabFood, ShopeeFood, Xanh SM? Còn kênh nào khác?
-- Nhóm món: Classic Coffee, Creative Coffee, Cake, Combo, Fresh & Fruity, Seasonal, Brewed Tea, Matcha, Yuzu Selection, Fresh Milk Tea, Món Mặn? `item_type_id` có phải tên nhóm này không, hay chỉ là mã?
 - Giờ mở cửa: mẫu có đơn lúc 0–4 giờ sáng. Có cửa hàng mở 24/7? Khung Sáng/Ngày/Đêm đang chia đúng ý chưa?
 - Sản phẩm mùa vụ (ví dụ Seasonal Mùa Thu): mùa nào, để agent không nhầm hết mùa là bán kém.
 

@@ -29,6 +29,13 @@ ROLE_TABLES: dict[str, set[str]] = {
 }
 
 
+# Bảng gốc bị chặn với MỌI vai trò (kể cả "dwh.*"): đã có view thay thế đủ tên hiển thị.
+#   dwh.dim_channel -> dwh.v_channel (tên nguồn đơn)
+#   dwh.dim_item    -> dwh.v_item    (tên nhóm món item_type_name)
+# Khớp với REVOKE trên role PostgreSQL agent_readonly.
+BLOCKED_TABLES: frozenset[str] = frozenset({"dwh.dim_channel", "dwh.dim_item"})
+
+
 class PermissionDenied(Exception):
     """Vai trò hiện tại không được xem bảng được yêu cầu."""
 
@@ -40,6 +47,8 @@ def is_known_role(role: Optional[str]) -> bool:
 def _match(patterns: set[str], table: str) -> bool:
     """Bảng "schema.table" có khớp tập quyền không."""
     table = table.lower()
+    if table in BLOCKED_TABLES:
+        return False
     schema = table.split(".", 1)[0]
     return "*" in patterns or table in patterns or f"{schema}.*" in patterns
 
