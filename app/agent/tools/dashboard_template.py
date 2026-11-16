@@ -836,7 +836,7 @@ TEMPLATE = r"""<!DOCTYPE html>
       return lines.length > 3 ? lines.slice(0, 2).concat([lines.slice(2).join(' ').slice(0, 13) + '…']) : lines;
     }
     var many = m.labels.length > 12;
-    var fromZero = c.begin_at_zero !== undefined ? !!c.begin_at_zero : c.type !== 'line';
+    var fromZero = true;   // mọi biểu đồ (cột, đường) luôn bắt đầu trục giá trị từ 0
     var catAxis = { stacked: m.stacked, grid: { display: false }, border: { color: line },
       ticks: { color: hz ? ink : muted, autoSkip: !hz && many, maxRotation: hz ? 0 : (many ? 50 : 0),
                callback: hz ? truncLabel : wrapLabel,
