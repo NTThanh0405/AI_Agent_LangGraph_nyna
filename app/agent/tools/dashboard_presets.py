@@ -132,6 +132,12 @@ LEFT JOIN i ON i.sale_key = b.sale_key
 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
 ORDER BY 2"""
 
+# Trang Nền tảng chỉ lấy các nền tảng giao hàng (theo source_id trong dwh.v_channel):
+#   10000232 = GRABFOOD, 10000169 = ShopeeFood, SOURCE-KAQK = XANH SM.
+# Thêm / bớt nền tảng: sửa danh sách này (chỉ dùng mã cố định, không lấy từ người dùng).
+NEN_TANG_SOURCE_IDS = ("10000232", "10000169", "SOURCE-KAQK")
+_NEN_TANG_IN = ", ".join("'" + s.replace("'", "''") + "'" for s in NEN_TANG_SOURCE_IDS)
+
 # Trang Nền tảng: kỳ này + kỳ trước + lịch sử theo tuần (tuần tính lùi từ d_to, đủ 7 ngày).
 _NEN_TANG_SQL = "WITH " + _PERIOD_CTE + """,
 b AS (
@@ -139,6 +145,8 @@ b AS (
   FROM dwh.fact_sales s
   WHERE NOT s.is_deleted
     AND s.tran_date BETWEEN __H_FROM__ AND __D_TO__
+    AND s.channel_key IN (SELECT channel_key FROM dwh.v_channel
+                          WHERE source_id IN (__NEN_TANG_IN__))
 )
 SELECT
   CASE WHEN b.tran_date >= r.d_from THEN 'nay'
@@ -160,7 +168,7 @@ CROSS JOIN r
 JOIN dwh.dim_store st ON st.store_key = b.store_key
 JOIN dwh.v_channel ch ON ch.channel_key = b.channel_key
 GROUP BY 1, 2, 3, 4, 5, 6, 7
-ORDER BY 2"""
+ORDER BY 2""".replace("__NEN_TANG_IN__", _NEN_TANG_IN)
 
 _SAN_PHAM_SQL = "WITH " + _PERIOD_CTE + """,
 s AS (
@@ -337,7 +345,7 @@ PRESETS = {
              "x": "ngay_qd", "x_format": "weekday", "y": ["doanh_thu"], "compare": True, "span": 7},
             {"title": "Doanh thu Net theo cửa hàng", "type": "bar",
              "x": "cua_hang", "y": ["doanh_thu"], "compare": True, "sort": "desc", "span": 5},
-            {"title": "Doanh thu Net theo nền tảng", "type": "bar",
+            {"title": "Doanh thu Net theo nguồn đơn", "type": "bar", "horizontal": True,
              "x": "nen_tang", "y": ["doanh_thu"], "compare": True, "sort": "desc", "span": 4},
             {"title": "Doanh thu Net theo giờ", "type": "bar", "x": "gio", "x_values": HOURS,
              "y": ["doanh_thu"], "color_by": "ca", "span": 8},
@@ -377,7 +385,7 @@ PRESETS = {
     # ---------------- 3. Nền tảng ----------------
     "nen_tang": {
         "name": "Nền tảng", "title": "Nền tảng",
-        "description": "Bảng chỉ số theo nền tảng (doanh thu, % so kỳ trước, tỉ trọng, số đơn, AOV); "
+        "description": "Chỉ gồm các nền tảng giao hàng GrabFood, ShopeeFood, Xanh SM. Bảng chỉ số theo nền tảng (doanh thu, % so kỳ trước, tỉ trọng, số đơn, AOV); "
                        "doanh thu theo tuần của từng nền tảng (4 tuần gần nhất); bảng chéo cửa hàng x nền tảng.",
         "theme": "nyna",
         "filters": [_F_NGAY, _F_NT, _F_KV],
@@ -523,9 +531,9 @@ PRESETS = {
             {"title": "Tỉ lệ hủy theo ngày", "type": "line",
              "x": "ngay_qd", "x_format": "weekday", "y": ["so_don_huy"], "agg": "ratio", "denom": "so_don",
              "compare": True, "format": "percent", "span": 6},
-            {"title": "GMV theo nền tảng", "type": "bar",
+            {"title": "GMV theo nền tảng", "type": "bar", "horizontal": True,
              "x": "nen_tang", "y": ["gmv"], "compare": True, "sort": "desc", "span": 6},
-            {"title": "Khuyến mãi: quán chịu vs đối tác chịu", "type": "bar",
+            {"title": "Khuyến mãi: quán chịu vs đối tác chịu", "type": "bar", "horizontal": True,
              "x": "nen_tang", "y": ["km_quan", "km_doi_tac"], "stacked": True, "sort": "desc", "span": 6},
             {"title": "Đơn online theo giờ đặt", "type": "bar", "x": "gio", "x_values": HOURS,
              "y": ["so_don"], "compare": True, "format": "number", "span": 12},
