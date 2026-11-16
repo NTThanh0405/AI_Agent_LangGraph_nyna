@@ -41,12 +41,12 @@
 - Dòng `fact_sale_items` có `parent_item_id` khác rỗng được coi là topping hoặc món trong combo. (Giả định, chưa xác nhận.)
 
 ## Nhóm món
-- `dim_item.item_type_id`. Hiện là mã; có tên nhóm (Classic Coffee, Cake...) thì dùng tên.
+- Tên nhóm món: `dwh.v_item.item_type_name` (JOIN theo `item_key`). Không hiển thị mã `item_type_id` cho người đọc.
 
 ## Kênh bán / Nền tảng
-- "Kênh", "nền tảng", "app" là một. Lấy từ `dwh.dim_channel` qua `fact_sales.channel_key`.
+- "Kênh", "nền tảng", "app" là một. Lấy từ `dwh.v_channel` qua `fact_sales.channel_key`.
 - Tên hiển thị: `source_name`, rỗng thì `channel`, rỗng nữa thì `source_id`; `channel_key = -1` → "Không xác định".
-- Tên kênh cụ thể (ví dụ GrabFood) phải xem bằng `SELECT DISTINCT channel, source_name FROM dwh.dim_channel` trước khi lọc, không đoán.
+- Tên kênh cụ thể (ví dụ GrabFood) phải xem bằng `SELECT DISTINCT channel, source_name FROM dwh.v_channel` trước khi lọc, không đoán.
 
 ## Cửa hàng / Khu vực
 - Cửa hàng: `dim_store.store_name` qua `fact_sales.store_key`.

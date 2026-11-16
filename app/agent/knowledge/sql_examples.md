@@ -24,7 +24,9 @@
    khi tính TỔNG hoặc tỉ trọng thì GIỮ `-1` và hiện là "Không xác định". Đếm khách luôn có `customer_key <> -1`.
 8. Tên kênh hiển thị (dùng y nguyên biểu thức này, giống dashboard và `queries/`):
    `CASE WHEN c.channel_key = -1 THEN 'Không xác định' ELSE COALESCE(NULLIF(c.source_name, ''), NULLIF(c.channel, ''), c.source_id) END`.
-   Lọc theo một kênh cụ thể thì chạy `SELECT DISTINCT channel, source_name FROM dwh.dim_channel` trước, không đoán tên.
+   Lọc theo một kênh cụ thể thì chạy `SELECT DISTINCT channel, source_name FROM dwh.v_channel` trước, không đoán tên.
+   Kênh lấy từ view `dwh.v_channel`, món và nhóm món lấy từ view `dwh.v_item` (cột `item_type_name`);
+   KHÔNG dùng `dwh.dim_channel`, `dwh.dim_item` (bị chặn quyền).
 9. JOIN sang bảng chi tiết (`fact_sale_items`, `fact_sale_payments`) thì KHÔNG SUM cột của
    `fact_sales` (bị nhân dòng). Cần cả số của bill lẫn số của món thì gộp bảng chi tiết theo
    `sale_key` trong một CTE trước rồi mới JOIN (ví dụ 4).
@@ -129,7 +131,7 @@ SELECT CASE WHEN c.channel_key = -1 THEN 'Không xác định'
        ROUND(100.0 * SUM(s.final_amount)
              / NULLIF(SUM(SUM(s.final_amount)) OVER (), 0), 1) AS ty_trong_pct
 FROM dwh.fact_sales s
-JOIN dwh.dim_channel c ON c.channel_key = s.channel_key
+JOIN dwh.v_channel c ON c.channel_key = s.channel_key
 WHERE s.is_deleted = FALSE
   AND s.tran_date BETWEEN DATE '2026-11-02' AND DATE '2026-11-08'
 GROUP BY 1
@@ -150,7 +152,7 @@ SELECT st.store_name                                   AS cua_hang,
              / NULLIF(SUM(SUM(s.final_amount)) OVER (PARTITION BY st.store_key), 0), 1) AS ty_trong_trong_cua_hang_pct
 FROM dwh.fact_sales s
 JOIN dwh.dim_store   st ON st.store_key = s.store_key
-JOIN dwh.dim_channel c  ON c.channel_key = s.channel_key
+JOIN dwh.v_channel c  ON c.channel_key = s.channel_key
 WHERE s.is_deleted = FALSE
   AND s.store_key <> -1
   AND s.tran_date BETWEEN DATE '2026-11-02' AND DATE '2026-11-08'
@@ -196,7 +198,7 @@ SELECT COALESCE(NULLIF(d.item_name, ''), d.item_id)   AS mon,
        ROUND(SUM(i.amount), 0)                        AS doanh_thu
 FROM dwh.fact_sale_items i
 JOIN dwh.fact_sales s ON s.sale_key = i.sale_key
-JOIN dwh.dim_item   d ON d.item_key = i.item_key
+JOIN dwh.v_item   d ON d.item_key = i.item_key
 WHERE s.is_deleted = FALSE
   AND i.item_key <> -1
   AND i.is_gift IS NOT TRUE
@@ -204,6 +206,27 @@ WHERE s.is_deleted = FALSE
 GROUP BY d.item_key, d.item_name, d.item_id
 ORDER BY doanh_thu DESC
 LIMIT 10;
+```
+
+## 8b. Doanh thu theo nhóm món
+
+Hỏi: "Nhóm món nào bán tốt nhất?", "Doanh thu Matcha tuần này?"
+Lưu ý: tên nhóm lấy từ `v_item.item_type_name`. Lọc một nhóm cụ thể thì chạy
+`SELECT DISTINCT item_type_name FROM dwh.v_item` trước, không đoán tên.
+
+```sql
+SELECT d.item_type_name                     AS nhom_mon,
+       SUM(i.quantity)                      AS so_luong,
+       ROUND(SUM(i.amount), 0)              AS doanh_thu
+FROM dwh.fact_sale_items i
+JOIN dwh.fact_sales s ON s.sale_key = i.sale_key
+JOIN dwh.v_item     d ON d.item_key = i.item_key
+WHERE s.is_deleted = FALSE
+  AND i.item_key <> -1
+  AND i.is_gift IS NOT TRUE
+  AND s.tran_date BETWEEN DATE '2026-11-02' AND DATE '2026-11-08'
+GROUP BY d.item_type_name
+ORDER BY doanh_thu DESC;
 ```
 
 ## 9. Món bán chậm (gồm cả món không bán được)
@@ -230,7 +253,7 @@ SELECT COALESCE(NULLIF(d.item_name, ''), d.item_id) AS mon,
        m.so_luong,
        ROUND(m.doanh_thu, 0)                        AS doanh_thu
 FROM mon m
-JOIN dwh.dim_item d ON d.item_key = m.item_key
+JOIN dwh.v_item d ON d.item_key = m.item_key
 ORDER BY m.doanh_thu ASC, m.so_luong ASC
 LIMIT 10;
 ```
@@ -383,7 +406,7 @@ SELECT CASE WHEN c.channel_key = -1 THEN 'Không xác định'
        o.order_status                 AS trang_thai,
        COUNT(*)                       AS so_don
 FROM dwh.fact_online_orders o
-JOIN dwh.dim_channel c ON c.channel_key = o.channel_key
+JOIN dwh.v_channel c ON c.channel_key = o.channel_key
 WHERE o.created_ts >= (DATE '2026-11-02')::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh'
   AND o.created_ts <  (DATE '2026-11-08' + 1)::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh'
 GROUP BY 1, 2
@@ -415,7 +438,7 @@ SELECT COALESCE(NULLIF(d.item_name, ''), d.item_id) AS mon,
        st.store_name                                AS cua_hang,
        COUNT(*)                                     AS so_lan_het_hang
 FROM dwh.fact_item_stock_events e
-JOIN dwh.dim_item  d  ON d.item_key  = e.item_key
+JOIN dwh.v_item  d  ON d.item_key  = e.item_key
 JOIN dwh.dim_store st ON st.store_key = e.store_key
 WHERE e.status = 'OUT_OF_STOCK'
   AND e.updated_ts >= (DATE '2026-11-02')::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh'
@@ -477,7 +500,7 @@ Sửa: nhóm theo `s.tran_date`, hoặc `(s.tran_ts AT TIME ZONE 'Asia/Ho_Chi_Mi
 SELECT (SELECT SUM(final_amount) FROM dwh.fact_sales)
      + (SELECT SUM(total_amount) FROM dwh.fact_online_orders);
 ```
-Sửa: doanh thu theo kênh dùng `fact_sales` JOIN `dim_channel` (ví dụ 5).
+Sửa: doanh thu theo kênh dùng `fact_sales` JOIN `v_channel` (ví dụ 5).
 
 ### Sai 5: đếm khách gồm cả khách vãng lai
 ```sql
@@ -490,7 +513,7 @@ Sửa: thêm `WHERE customer_key <> -1` và nói rõ đây là số khách thàn
 ```sql
 -- SAI: bỏ bill chưa gán kênh làm tổng doanh thu thấp hơn thực tế, tỉ trọng các kênh bị thổi lên
 SELECT c.source_name, SUM(s.final_amount)
-FROM dwh.fact_sales s JOIN dwh.dim_channel c ON c.channel_key = s.channel_key
+FROM dwh.fact_sales s JOIN dwh.v_channel c ON c.channel_key = s.channel_key
 WHERE s.is_deleted = FALSE AND s.channel_key <> -1
 GROUP BY 1;
 ```

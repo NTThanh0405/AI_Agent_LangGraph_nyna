@@ -127,7 +127,7 @@ SELECT
 FROM b
 CROSS JOIN r
 JOIN dwh.dim_store st ON st.store_key = b.store_key
-JOIN dwh.dim_channel ch ON ch.channel_key = b.channel_key
+JOIN dwh.v_channel ch ON ch.channel_key = b.channel_key
 LEFT JOIN i ON i.sale_key = b.sale_key
 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
 ORDER BY 2"""
@@ -158,7 +158,7 @@ SELECT
 FROM b
 CROSS JOIN r
 JOIN dwh.dim_store st ON st.store_key = b.store_key
-JOIN dwh.dim_channel ch ON ch.channel_key = b.channel_key
+JOIN dwh.v_channel ch ON ch.channel_key = b.channel_key
 GROUP BY 1, 2, 3, 4, 5, 6, 7
 ORDER BY 2"""
 
@@ -177,7 +177,7 @@ SELECT
   CASE WHEN ch.channel_key = -1 THEN 'Không xác định'
        ELSE COALESCE(NULLIF(ch.source_name, ''), NULLIF(ch.channel, ''), ch.source_id) END AS nen_tang,
   COALESCE(NULLIF(di.item_name, ''), di.item_id) AS mon,
-  COALESCE(NULLIF(di.item_type_id, ''), 'Chưa phân loại') AS nhom_mon,  -- đổi sang tên nhóm món khi DWH có
+  COALESCE(NULLIF(di.item_type_name, ''), 'Chưa phân loại') AS nhom_mon,  -- tên nhóm món từ dwh.v_item
   CASE WHEN COALESCE(it.parent_item_id, '') <> '' THEN 'Món con / topping' ELSE 'Món chính' END AS loai_dong,
   SUM(it.quantity) AS so_luong,
   SUM(it.amount) AS doanh_thu,
@@ -186,8 +186,8 @@ FROM s
 CROSS JOIN r
 JOIN dwh.fact_sale_items it ON it.sale_key = s.sale_key
 JOIN dwh.dim_store st ON st.store_key = s.store_key
-JOIN dwh.dim_channel ch ON ch.channel_key = s.channel_key
-JOIN dwh.dim_item di ON di.item_key = it.item_key
+JOIN dwh.v_channel ch ON ch.channel_key = s.channel_key
+JOIN dwh.v_item di ON di.item_key = it.item_key
 WHERE it.is_gift IS NOT TRUE
 GROUP BY 1, 2, 3, 4, 5, 6, 7, 8"""
 
@@ -282,7 +282,7 @@ SELECT
 FROM o
 CROSS JOIN r
 JOIN dwh.dim_store st ON st.store_key = o.store_key
-JOIN dwh.dim_channel ch ON ch.channel_key = o.channel_key
+JOIN dwh.v_channel ch ON ch.channel_key = o.channel_key
 GROUP BY 1, 2, 3, 4, 5, 6
 ORDER BY 2"""
 
