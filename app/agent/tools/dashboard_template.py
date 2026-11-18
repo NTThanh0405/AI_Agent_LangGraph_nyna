@@ -57,16 +57,25 @@ TEMPLATE = r"""<!DOCTYPE html>
   .side { flex: none; width: 190px; position: sticky; top: 20px; }
   .side[hidden] { display: none; }
   .content { flex: 1 1 0; min-width: 0; }
-  /* Tiêu đề ở trên, thanh bộ lọc nằm riêng một hàng ngay dưới, rộng đúng bằng vùng nội dung
-     (thẳng mép với các khối biểu đồ) -> có thanh menu bên trái cũng không bị đẩy lệch khỏi khung. */
-  .top { display: flex; flex-direction: column; align-items: stretch; gap: 12px; margin-bottom: 16px; }
-  header { display: flex; align-items: center; gap: 14px; min-width: 0; }
-  #filterSlot { width: 100%; min-width: 0; }
-  #filterSlot .filters { justify-content: flex-start; align-items: flex-end; gap: 8px 16px; }
-  #filterSlot .f { min-width: 0; }
-  #filterSlot .f select { min-width: 130px; max-width: 200px; }
-  #filterSlot .f .dates input { width: 132px; }
-  #filterSlot .reset { margin-left: auto; }
+  /* Tiêu đề bên trái, bộ lọc bên phải trên CÙNG MỘT HÀNG, kể cả khi có menu trang bên trái:
+     - bộ lọc không xuống dòng (nowrap), ô chọn có độ rộng cố định gọn để luôn vừa;
+     - tiêu đề và dòng mô tả không xuống dòng, quá dài thì cắt bằng dấu '…' (rê chuột xem đủ);
+     - chỉ màn hẹp (dưới 1000px) mới đưa bộ lọc xuống dưới tiêu đề. */
+  .top { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: nowrap; margin-bottom: 16px; }
+  header { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1 1 auto; }
+  header > div { min-width: 0; }
+  header h1, header .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #filterSlot { flex: 0 0 auto; min-width: 0; }
+  #filterSlot .filters { flex-wrap: nowrap; justify-content: flex-end; align-items: flex-end; gap: 10px; }
+  #filterSlot .f { flex: none; }
+  #filterSlot .f select { width: 118px; min-width: 0; max-width: none; }
+  #filterSlot .f .dates input { width: 122px; }
+  #filterSlot .reset { flex: none; white-space: nowrap; }
+  @media (max-width: 1000px) {
+    .top { flex-wrap: wrap; }
+    header, #filterSlot { flex: 1 1 100%; }
+    #filterSlot .filters { flex-wrap: wrap; justify-content: flex-start; }
+  }
   header img { height: 56px; width: auto; flex: none; }
   header img[hidden] { display: none; }
   @media (max-width: 820px) {
@@ -333,7 +342,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   // ---------- lọc: một lần cho mỗi lần đổi bộ lọc ----------
   // all = mọi dòng qua bộ lọc chọn (bỏ qua lọc ngày và kỳ) — dùng cho khối scope: 'all' (vd. theo tuần)
   function filtered(view) {
-    var d = view.d, ci = d._ci, kyi = ci.ky, cur = [], prev = [], all = [], sel = [], dates = [];
+    var d = view.d, ci = d._ci, kyi = ci.ky, cur = [], prev = [], all = [], sel = [], dates = [], ex = {};
     d.filters.forEach(function (f) {
       var v = view.st[f.column];
       if (ci[f.column] === undefined) return;
@@ -350,36 +359,21 @@ TEMPLATE = r"""<!DOCTYPE html>
       }
       var k = kyi === undefined ? 'nay' : r[kyi];
       if (k === 'nay') cur.push(r); else if (k === 'truoc') prev.push(r);
+      else if (k) (ex[k] = ex[k] || []).push(r);     // kỳ so sánh thêm, vd. 'thang_truoc'
     });
-    // ngày cuối đang lọc (để chia tuần cho khối scope 'weeks')
-    var end = '';
-    if (d._weekDate) {
-      var dv = view.st[d._weekDate], b = view.bounds[d._weekDate];
-      end = (dv && dv[1]) || (b && b[1]) || '';
+    // số ngày đang lọc (đặt tên đường so sánh: 'tuần trước' khi lọc <= 7 ngày, 'kỳ trước' khi dài hơn)
+    var days = 0;
+    if (dates.length || d._dateCol) {
+      var dc = d._dateCol, dv = view.st[dc] || [], bd = view.bounds[dc] || [];
+      var a0 = Date.parse(dv[0] || bd[0] || ''), b0 = Date.parse(dv[1] || bd[1] || '');
+      if (isFinite(a0) && isFinite(b0)) days = Math.round((b0 - a0) / 864e5) + 1;
     }
-    return { cur: cur, prev: prev, all: all, end: end };
+    return { cur: cur, prev: prev, all: all, ex: ex, days: days };
   }
   // scope 'all': dùng cả lịch sử; where {cột: giá trị}: lọc cố định riêng cho khối (vd. chỉ món chính)
-  // scope 'weeks': chỉ dữ liệu kỳ này trong khoảng ngày đang lọc, chia tuần 7 ngày tính lùi từ ngày
-  // cuối đang lọc. Thêm 2 cột ảo _tuan (nhãn 'dd/mm – dd/mm') và _tuan_stt (thứ tự) cho trục x.
-  function ymd(s) { var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || ''); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : null; }
-  function ddmm(t) { var x = new Date(t); return ('0' + x.getUTCDate()).slice(-2) + '/' + ('0' + (x.getUTCMonth() + 1)).slice(-2); }
-  function weekRows(f, d) {
-    var di = d._ci[d._weekDate], end = ymd(f.end), DAY = 864e5;
-    if (di === undefined || end === null) return { cur: [], prev: [], all: [] };
-    var out = [];
-    f.cur.forEach(function (r) {
-      var t = ymd(day(r[di]));
-      if (t === null || t > end) return;
-      var w = Math.floor((end - t) / (7 * DAY)), we = end - w * 7 * DAY;
-      out.push(r.concat([ddmm(we - 6 * DAY) + ' – ' + ddmm(we), -w]));
-    });
-    return { cur: out, prev: [], all: out };
-  }
   // exclude {cột: [giá trị]}: bỏ hẳn các giá trị này khỏi riêng khối (vd. bỏ một nguồn đơn)
   function scoped(c, f, d) {
-    var s = c.scope === 'all' ? { cur: f.all, prev: [], all: f.all } : f;
-    if (c.scope === 'weeks') s = weekRows(f, d);
+    var s = c.scope === 'all' ? { cur: f.all, prev: [], all: f.all, ex: {}, days: f.days } : f;
     if (!c.where && !c.exclude) return s;
     var conds = Object.keys(c.where || {}).filter(function (k) { return d._ci[k] !== undefined; })
       .map(function (k) { return [d._ci[k], String(c.where[k])]; });
@@ -392,7 +386,9 @@ TEMPLATE = r"""<!DOCTYPE html>
       return conds.every(function (cd) { return key(r[cd[0]]) === cd[1]; }) &&
         nots.every(function (nd) { return !nd[1].has(key(r[nd[0]])); });
     }
-    return { cur: s.cur.filter(keep), prev: s.prev.filter(keep), all: s.all.filter(keep) };
+    var ex = {};
+    Object.keys(s.ex || {}).forEach(function (k) { ex[k] = s.ex[k].filter(keep); });
+    return { cur: s.cur.filter(keep), prev: s.prev.filter(keep), all: s.all.filter(keep), ex: ex, days: s.days };
   }
 
   // ---------- cộng gộp ----------
@@ -529,9 +525,19 @@ TEMPLATE = r"""<!DOCTYPE html>
       }
       names.sort(function (a, b) { return (seriesRank(tc, a) - seriesRank(tc, b)) || a.localeCompare(b, 'vi', { numeric: true }); });
       if (buckets.has(OTHER)) names.push(OTHER);
+      // compare_series: mỗi nhóm thêm đường so sánh (cùng màu, nét đứt) cho từng kỳ khai báo
+      var cmpS2 = (c.compare_series || []).filter(function (cs) { return cs.ky === 'truoc' || (f.ex && f.ex[cs.ky]); });
+      var cbRows = function (rows, n) { return rows.filter(function (r) { return key(r[cb]) === n; }); };
       names.forEach(function (n, j) {
-        series.push({ name: n, values: vals(groupBy(buckets.get(n), kf), ys[0]),
-          color: n === OTHER ? tc.prev : seriesColor(tc, n, j) });
+        var col0 = n === OTHER ? tc.prev : seriesColor(tc, n, j);
+        series.push({ name: n, values: vals(groupBy(buckets.get(n), kf), ys[0]), color: col0 });
+        if (n === OTHER) return;
+        cmpS2.forEach(function (cs) {
+          var src = cs.ky === 'truoc' ? f.prev : f.ex[cs.ky];
+          var lab = (f.days && f.days <= 7 && cs.label_week) ? cs.label_week : (cs.label || cs.ky);
+          series.push({ name: n + ' – ' + lab, values: vals(groupBy(cbRows(src, n), kf), ys[0]),
+            color: hexAlpha(col0, cs.alpha || 0.5), prev: true, dash: cs.dash || [5, 4] });
+        });
       });
     } else {
       var single = ys.length === 1;
@@ -837,9 +843,9 @@ TEMPLATE = r"""<!DOCTYPE html>
       }
       if (c.type === 'line') {
         return { label: s.name, data: s.values, borderColor: s.color, backgroundColor: s.color,
-          borderWidth: 2, tension: 0.25, cubicInterpolationMode: 'monotone',
-          pointRadius: m.labels.length > 45 ? 0 : 3, spanGaps: true,
-          borderDash: s.prev ? [5, 4] : [], labelColor: s.prev ? muted : ink };
+          tension: 0.25, cubicInterpolationMode: 'monotone', spanGaps: true,
+          borderWidth: s.prev ? 1.5 : 2, pointRadius: s.prev ? 0 : (m.labels.length > 45 ? 0 : 3),
+          borderDash: s.dash || (s.prev ? [5, 4] : []), labelColor: s.prev ? muted : ink, noLabel: !!s.dash };
       }
       return { label: s.name, data: s.values, backgroundColor: s.color, borderRadius: 1,
         maxBarThickness: hz ? 14 : 34, categoryPercentage: 0.75, barPercentage: 0.9,
@@ -970,6 +976,7 @@ TEMPLATE = r"""<!DOCTYPE html>
       }
     });
     view.sub.textContent = parts.join(' · ');
+    view.sub.title = view.sub.textContent;
   }
 
   // ---------- CSV ----------
@@ -1113,9 +1120,7 @@ TEMPLATE = r"""<!DOCTYPE html>
     });
     d._ci = {};
     cols.forEach(function (c, k) { d._ci[c] = k; });
-    // cột ảo cho khối scope 'weeks' (xem weekRows); cột ngày dùng để chia tuần = bộ lọc ngày đầu tiên
-    if (d._ci._tuan === undefined) { d._ci._tuan = cols.length; d._ci._tuan_stt = cols.length + 1; }
-    d.filters.forEach(function (f) { if (!d._weekDate && f.type === 'date' && d._ci[f.column] !== undefined) d._weekDate = f.column; });
+    d.filters.forEach(function (f) { if (!d._dateCol && f.type === 'date' && d._ci[f.column] !== undefined) d._dateCol = f.column; });
     // Số đo đến dạng chuỗi (Decimal của Postgres) -> số
     var idx = new Set();
     function add(c) { if (c && d._ci[c] !== undefined) idx.add(d._ci[c]); }
