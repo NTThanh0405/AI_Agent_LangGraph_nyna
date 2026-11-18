@@ -864,16 +864,25 @@ TEMPLATE = r"""<!DOCTYPE html>
       lines = lines.map(function (s) { return s.length > 16 ? s.slice(0, 15) + '…' : s; });
       return lines.length > 2 ? [lines[0], (lines.slice(1).join(' ')).slice(0, 15) + '…'] : lines;
     }
-    // Nhãn dài trên trục ngang: xuống dòng theo từ thay vì xoay nghiêng
+    // Nhãn dài trên trục ngang: xuống dòng theo từ thay vì xoay nghiêng. Số ký tự mỗi dòng tính theo
+    // độ rộng thật của mỗi cột (bề rộng biểu đồ / số nhãn), nên tên dài (vd. tên cửa hàng) không đè
+    // lên nhãn bên cạnh; tối đa 3 dòng, từ quá dài thì cắt bằng '…'.
     function wrapLabel(v) {
       var l = String(this.getLabelForValue(v));
-      if (l.length <= 10) return l;
+      var n = Math.max(1, (this.chart.data.labels || []).length);
+      var slot = (this.chart.chartArea ? this.chart.chartArea.right - this.chart.chartArea.left : this.chart.width * 0.88) / n;
+      var px = (many ? 10 : 11) * 0.62;                       // bề rộng trung bình 1 ký tự
+      // nhiều nhãn (> 12, vd. 24 giờ): trục tự xoay nghiêng + bỏ bớt nhãn, giữ cách cũ 12 ký tự/dòng
+      var max = many ? 12 : Math.max(4, Math.floor((slot - 8) / px));
+      if (l.length <= (many ? 10 : max)) return l;
       var lines = [], cur = '';
       l.split(' ').forEach(function (w) {
-        if (cur && (cur + ' ' + w).length > 12) { lines.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w;
+        if (w.length > max) w = w.slice(0, max - 1) + '…';
+        if (cur && (cur + ' ' + w).length > max) { lines.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w;
       });
       if (cur) lines.push(cur);
-      return lines.length > 3 ? lines.slice(0, 2).concat([lines.slice(2).join(' ').slice(0, 13) + '…']) : lines;
+      if (lines.length > 3) { lines = lines.slice(0, 3); lines[2] = lines[2].slice(0, max - 1) + '…'; }
+      return lines;
     }
     var many = m.labels.length > 12;
     var fromZero = true;   // mọi biểu đồ (cột, đường) luôn bắt đầu trục giá trị từ 0
