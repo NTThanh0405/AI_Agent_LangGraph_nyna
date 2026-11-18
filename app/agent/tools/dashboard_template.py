@@ -57,20 +57,16 @@ TEMPLATE = r"""<!DOCTYPE html>
   .side { flex: none; width: 190px; position: sticky; top: 20px; }
   .side[hidden] { display: none; }
   .content { flex: 1 1 0; min-width: 0; }
-  /* Tiêu đề bên trái, bộ lọc bên phải trên cùng một hàng. Tiêu đề tự xuống dòng để nhường chỗ cho
-     bộ lọc; màn hẹp (dưới 1100px) mới đưa bộ lọc xuống dưới tiêu đề. */
-  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 24px; flex-wrap: nowrap; margin-bottom: 16px; }
-  header { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1 0 340px; }
-  #filterSlot { flex: 0 1 auto; min-width: 0; }
-  #filterSlot .filters { justify-content: flex-end; gap: 8px; }
-  #filterSlot .f { padding: 5px 8px 7px; }
-  #filterSlot .f select { min-width: 112px; }
-  #filterSlot .f .dates input { width: 122px; }
-  @media (max-width: 1100px) {
-    .top { flex-wrap: wrap; }
-    header, #filterSlot { flex: 1 1 100%; }
-    #filterSlot .filters { justify-content: flex-start; }
-  }
+  /* Tiêu đề ở trên, thanh bộ lọc nằm riêng một hàng ngay dưới, rộng đúng bằng vùng nội dung
+     (thẳng mép với các khối biểu đồ) -> có thanh menu bên trái cũng không bị đẩy lệch khỏi khung. */
+  .top { display: flex; flex-direction: column; align-items: stretch; gap: 12px; margin-bottom: 16px; }
+  header { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  #filterSlot { width: 100%; min-width: 0; }
+  #filterSlot .filters { justify-content: flex-start; align-items: flex-end; gap: 8px 16px; }
+  #filterSlot .f { min-width: 0; }
+  #filterSlot .f select { min-width: 130px; max-width: 200px; }
+  #filterSlot .f .dates input { width: 132px; }
+  #filterSlot .reset { margin-left: auto; }
   header img { height: 56px; width: auto; flex: none; }
   header img[hidden] { display: none; }
   @media (max-width: 820px) {
@@ -355,15 +351,47 @@ TEMPLATE = r"""<!DOCTYPE html>
       var k = kyi === undefined ? 'nay' : r[kyi];
       if (k === 'nay') cur.push(r); else if (k === 'truoc') prev.push(r);
     });
-    return { cur: cur, prev: prev, all: all };
+    // ngày cuối đang lọc (để chia tuần cho khối scope 'weeks')
+    var end = '';
+    if (d._weekDate) {
+      var dv = view.st[d._weekDate], b = view.bounds[d._weekDate];
+      end = (dv && dv[1]) || (b && b[1]) || '';
+    }
+    return { cur: cur, prev: prev, all: all, end: end };
   }
   // scope 'all': dùng cả lịch sử; where {cột: giá trị}: lọc cố định riêng cho khối (vd. chỉ món chính)
+  // scope 'weeks': chỉ dữ liệu kỳ này trong khoảng ngày đang lọc, chia tuần 7 ngày tính lùi từ ngày
+  // cuối đang lọc. Thêm 2 cột ảo _tuan (nhãn 'dd/mm – dd/mm') và _tuan_stt (thứ tự) cho trục x.
+  function ymd(s) { var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || ''); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : null; }
+  function ddmm(t) { var x = new Date(t); return ('0' + x.getUTCDate()).slice(-2) + '/' + ('0' + (x.getUTCMonth() + 1)).slice(-2); }
+  function weekRows(f, d) {
+    var di = d._ci[d._weekDate], end = ymd(f.end), DAY = 864e5;
+    if (di === undefined || end === null) return { cur: [], prev: [], all: [] };
+    var out = [];
+    f.cur.forEach(function (r) {
+      var t = ymd(day(r[di]));
+      if (t === null || t > end) return;
+      var w = Math.floor((end - t) / (7 * DAY)), we = end - w * 7 * DAY;
+      out.push(r.concat([ddmm(we - 6 * DAY) + ' – ' + ddmm(we), -w]));
+    });
+    return { cur: out, prev: [], all: out };
+  }
+  // exclude {cột: [giá trị]}: bỏ hẳn các giá trị này khỏi riêng khối (vd. bỏ một nguồn đơn)
   function scoped(c, f, d) {
     var s = c.scope === 'all' ? { cur: f.all, prev: [], all: f.all } : f;
-    if (!c.where) return s;
-    var conds = Object.keys(c.where).filter(function (k) { return d._ci[k] !== undefined; })
+    if (c.scope === 'weeks') s = weekRows(f, d);
+    if (!c.where && !c.exclude) return s;
+    var conds = Object.keys(c.where || {}).filter(function (k) { return d._ci[k] !== undefined; })
       .map(function (k) { return [d._ci[k], String(c.where[k])]; });
-    function keep(r) { return conds.every(function (cd) { return key(r[cd[0]]) === cd[1]; }); }
+    var nots = Object.keys(c.exclude || {}).filter(function (k) { return d._ci[k] !== undefined; })
+      .map(function (k) {
+        var vs = Array.isArray(c.exclude[k]) ? c.exclude[k] : [c.exclude[k]];
+        return [d._ci[k], new Set(vs.map(String))];
+      });
+    function keep(r) {
+      return conds.every(function (cd) { return key(r[cd[0]]) === cd[1]; }) &&
+        nots.every(function (nd) { return !nd[1].has(key(r[nd[0]])); });
+    }
     return { cur: s.cur.filter(keep), prev: s.prev.filter(keep), all: s.all.filter(keep) };
   }
 
@@ -461,6 +489,12 @@ TEMPLATE = r"""<!DOCTYPE html>
     if (!c.x_values && (sortMode === 'asc' || sortMode === 'desc')) {
       if (c.sort_by) sortByMetric(keys, gc, d, c.sort_by, 'sum', null, sortMode, c.null_as_zero);
       else sortByMetric(keys, gc, d, ys[0], c.agg, c.denom, sortMode, c.null_as_zero);
+    }
+    if (c.positive_only) {   // chỉ giữ nhãn có giá trị kỳ này > 0 (vd. món bán thấp nhất nhưng có doanh thu)
+      keys = keys.filter(function (k) {
+        var v = metric(gc.get(k), d, c.sort_by || ys[0], c.sort_by ? 'sum' : c.agg, c.sort_by ? null : c.denom);
+        return v !== null && v > 0;
+      });
     }
     var remap = new Map();
     if (limit && keys.length > limit) {
@@ -1079,6 +1113,9 @@ TEMPLATE = r"""<!DOCTYPE html>
     });
     d._ci = {};
     cols.forEach(function (c, k) { d._ci[c] = k; });
+    // cột ảo cho khối scope 'weeks' (xem weekRows); cột ngày dùng để chia tuần = bộ lọc ngày đầu tiên
+    if (d._ci._tuan === undefined) { d._ci._tuan = cols.length; d._ci._tuan_stt = cols.length + 1; }
+    d.filters.forEach(function (f) { if (!d._weekDate && f.type === 'date' && d._ci[f.column] !== undefined) d._weekDate = f.column; });
     // Số đo đến dạng chuỗi (Decimal của Postgres) -> số
     var idx = new Set();
     function add(c) { if (c && d._ci[c] !== undefined) idx.add(d._ci[c]); }

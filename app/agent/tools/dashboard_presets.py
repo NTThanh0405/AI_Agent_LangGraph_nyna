@@ -59,6 +59,8 @@ THEMES = {
             "Ngày": ["#5B8DB8", "#7FAAD0"],
             "Đêm": ["#1F3A5F", "#6C8FC4"],
             "Grab": ["#00B14F", "#3DD17F"],
+            "GRAB": ["#00B14F", "#3DD17F"],
+            "XANH": ["#0F9BA8", "#3CC3CF"],
             "Shopee": ["#EE4D2D", "#F57A60"],
             "Xanh": ["#0F9BA8", "#3CC3CF"],
             "Be": ["#F5B800", "#FFD24D"],
@@ -78,7 +80,7 @@ COLUMN_LABELS = {
     "so_khach": "Số khách HV", "so_khach_moi": "Khách mới", "so_don_hv": "Đơn hội viên",
     "doanh_thu_hv": "Doanh thu hội viên",
     "so_don_huy": "Đơn hủy", "gmv": "GMV", "km_quan": "KM quán chịu", "km_doi_tac": "KM đối tác chịu",
-    "phut_xac_nhan": "Tổng phút xác nhận",
+    "phut_xac_nhan": "Tổng phút xác nhận", "_tuan": "Tuần",
     "so_don_co_xac_nhan": "Đơn có giờ xác nhận",
 }
 
@@ -138,25 +140,20 @@ ORDER BY 2"""
 NEN_TANG_SOURCE_IDS = ("10000232", "10000169", "SOURCE-KAQK")
 _NEN_TANG_IN = ", ".join("'" + s.replace("'", "''") + "'" for s in NEN_TANG_SOURCE_IDS)
 
-# Trang Nền tảng: kỳ này + kỳ trước + lịch sử theo tuần (tuần tính lùi từ d_to, đủ 7 ngày).
+# Trang Nền tảng: kỳ này + kỳ trước. Biểu đồ theo tuần chia tuần ngay trên trình duyệt theo khoảng
+# ngày đang lọc (scope 'weeks'), nên không cần kéo thêm lịch sử cũ.
 _NEN_TANG_SQL = "WITH " + _PERIOD_CTE + """,
 b AS (
   SELECT s.store_key, s.channel_key, s.tran_date, s.final_amount
-  FROM dwh.fact_sales s
+  FROM dwh.fact_sales s CROSS JOIN r
   WHERE NOT s.is_deleted
-    AND s.tran_date BETWEEN __H_FROM__ AND __D_TO__
+    AND s.tran_date BETWEEN r.p_from AND r.d_to
     AND s.channel_key IN (SELECT channel_key FROM dwh.v_channel
                           WHERE source_id IN (__NEN_TANG_IN__))
 )
 SELECT
-  CASE WHEN b.tran_date >= r.d_from THEN 'nay'
-       WHEN b.tran_date >= r.p_from THEN 'truoc'
-       ELSE 'cu' END AS ky,
-  CASE WHEN b.tran_date >= r.d_from THEN b.tran_date
-       WHEN b.tran_date >= r.p_from THEN b.tran_date + r.n END AS ngay_qd,
-  -((r.d_to - b.tran_date) / 7) AS tuan_stt,
-  to_char(r.d_to - ((r.d_to - b.tran_date) / 7) * 7 - 6, 'DD/MM') || ' – ' ||
-    to_char(r.d_to - ((r.d_to - b.tran_date) / 7) * 7, 'DD/MM') AS tuan,
+  CASE WHEN b.tran_date >= r.d_from THEN 'nay' ELSE 'truoc' END AS ky,
+  CASE WHEN b.tran_date >= r.d_from THEN b.tran_date ELSE b.tran_date + r.n END AS ngay_qd,
   st.store_name AS cua_hang,
   CASE WHEN ch.channel_key = -1 THEN 'Không xác định'
        ELSE COALESCE(NULLIF(ch.source_name, ''), NULLIF(ch.channel, ''), ch.source_id) END AS nen_tang,
@@ -167,7 +164,7 @@ FROM b
 CROSS JOIN r
 JOIN dwh.dim_store st ON st.store_key = b.store_key
 JOIN dwh.v_channel ch ON ch.channel_key = b.channel_key
-GROUP BY 1, 2, 3, 4, 5, 6, 7
+GROUP BY 1, 2, 3, 4, 5
 ORDER BY 2""".replace("__NEN_TANG_IN__", _NEN_TANG_IN)
 
 _SAN_PHAM_SQL = "WITH " + _PERIOD_CTE + """,
@@ -304,7 +301,9 @@ ORDER BY 2"""
 #            series_limit?, stacked?, sort: asc|desc, sort_by? (cột dùng để xếp), limit? (top N),
 #            others?, horizontal?, hide_empty?, x_divisor? {tiền tố: số chia}, format?,
 #            labels?, legend? (trục giá trị luôn bắt đầu từ 0), height?, scope: 'all' (bỏ qua lọc ngày, dùng cả lịch sử),
-#            where? {cột: giá trị} (lọc cố định riêng khối), null_as_zero? (khi xếp, nhãn không có số = 0)}
+#            where? {cột: giá trị} (lọc cố định riêng khối), exclude? {cột: [giá trị]} (bỏ giá trị khỏi khối),
+#            null_as_zero? (khi xếp, nhãn không có số = 0), positive_only? (chỉ giữ nhãn có số kỳ này > 0),
+#            scope 'weeks' (chia tuần trong khoảng ngày đang lọc; x='_tuan', x_order='_tuan_stt')}
 #  table  : {x, x_label?, columns: [{label, column, agg?, denom?, format, delta?, delta_label?,
 #            share? (tỉ trọng trên tổng), good_when?}], total?, sort?, sort_by?, limit?}
 #  pivot  : {row, col, row_label?, col_label?, values: [{label, column, agg?, denom?, format?,
@@ -346,7 +345,8 @@ PRESETS = {
             {"title": "Doanh thu Net theo cửa hàng", "type": "bar",
              "x": "cua_hang", "y": ["doanh_thu"], "compare": True, "sort": "desc", "span": 5},
             {"title": "Doanh thu Net theo nguồn đơn", "type": "bar", "horizontal": True,
-             "x": "nen_tang", "y": ["doanh_thu"], "compare": True, "sort": "desc", "span": 4},
+             "x": "nen_tang", "y": ["doanh_thu"], "compare": True, "sort": "desc", "span": 4,
+             "exclude": {"nen_tang": ["APP_BRAND_4A8I"]}},
             {"title": "Doanh thu Net theo giờ", "type": "bar", "x": "gio", "x_values": HOURS,
              "y": ["doanh_thu"], "color_by": "ca", "span": 8},
         ],
@@ -386,7 +386,7 @@ PRESETS = {
     "nen_tang": {
         "name": "Nền tảng", "title": "Nền tảng",
         "description": "Chỉ gồm các nền tảng giao hàng GrabFood, ShopeeFood, Xanh SM. Bảng chỉ số theo nền tảng (doanh thu, % so kỳ trước, tỉ trọng, số đơn, AOV); "
-                       "doanh thu theo tuần của từng nền tảng (4 tuần gần nhất); bảng chéo cửa hàng x nền tảng.",
+                       "doanh thu theo tuần của từng nền tảng (chia tuần trong khoảng ngày đang lọc); bảng chéo cửa hàng x nền tảng.",
         "theme": "nyna",
         "filters": [_F_NGAY, _F_NT, _F_KV],
         "kpis": [],
@@ -400,9 +400,11 @@ PRESETS = {
                  {"label": "AOV", "column": "doanh_thu", **_AOV, "format": "number"},
              ],
              "total": True, "sort": "desc", "sort_by": "doanh_thu", "span": 12},
-            {"title": "Doanh thu Net theo tuần và nền tảng", "type": "line", "scope": "all",
-             "x": "tuan", "x_order": "tuan_stt", "y": ["doanh_thu"], "color_by": "nen_tang",
-             "height": 240, "span": 12},
+            # Theo tuần: chỉ trong khoảng ngày đang lọc (mặc định = kỳ báo cáo), tuần 7 ngày tính lùi
+            # từ ngày cuối đang lọc; _tuan/_tuan_stt là cột ảo do trình duyệt tạo.
+            {"title": "Doanh thu Net theo tuần và nền tảng", "type": "bar", "scope": "weeks",
+             "x": "_tuan", "x_order": "_tuan_stt", "y": ["doanh_thu"], "color_by": "nen_tang",
+             "stacked": False, "height": 260, "span": 12},
             {"title": "Doanh thu Net theo cửa hàng và nền tảng", "type": "pivot",
              "row": "cua_hang", "col": "nen_tang", "row_label": "Cửa hàng", "col_label": "Nền tảng",
              "values": [
@@ -425,10 +427,10 @@ PRESETS = {
         "charts": [
             {"title": "Top 10 món theo Doanh thu Net", "type": "bar", "horizontal": True,
              "x": "mon", "y": ["doanh_thu"], "compare": True, "sort": "desc", "limit": 10, "span": 6},
-            # Món bán chậm: chỉ món chính (bỏ topping/món con); món kỳ trước có bán mà kỳ này không
-            # bán được cái nào vẫn hiện, xếp đầu danh sách (null_as_zero).
+            # Món bán chậm: chỉ món chính (bỏ topping/món con) và chỉ món CÓ doanh thu kỳ này (> 0);
+            # món không bán / doanh thu luôn bằng 0 (cốc, day pass, quà tặng...) bị loại (positive_only).
             {"title": "Top 10 món bán thấp nhất", "type": "bar", "horizontal": True,
-             "x": "mon", "y": ["doanh_thu"], "compare": True, "sort": "asc", "null_as_zero": True,
+             "x": "mon", "y": ["doanh_thu"], "compare": True, "sort": "asc", "positive_only": True,
              "where": {"loai_dong": "Món chính"}, "limit": 10, "span": 6},
             {"title": "Doanh thu Net theo nhóm món", "type": "bar", "horizontal": True,
              "x": "nhom_mon", "y": ["doanh_thu"], "compare": True, "sort": "desc", "limit": 15, "span": 12},
@@ -636,7 +638,7 @@ def required_columns(name: str) -> list[str]:
 
     def add(*names):
         for n in names:
-            if n and n not in cols:
+            if n and not n.startswith("_") and n not in cols:   # cột '_...' do trình duyệt tự tạo
                 cols.append(n)
 
     if p["kpis"] or any(c.get("compare") or c.get("type") == "table" for c in p["charts"]):
