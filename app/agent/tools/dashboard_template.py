@@ -918,7 +918,9 @@ TEMPLATE = r"""<!DOCTYPE html>
       },
       scales: isPie ? {} : (hz ? { x: valAxis, y: catAxis } : { x: catAxis, y: valAxis })
     };
-    if (!isPie) options.interaction = { mode: 'index', intersect: false };
+    // Dò điểm theo trục danh mục: cột ngang (indexAxis 'y') phải dò theo trục dọc, nếu không
+    // tooltip không bám đúng hàng đang rê chuột.
+    if (!isPie) options.interaction = { mode: 'index', intersect: false, axis: hz ? 'y' : 'x' };
     return new Chart(canvas, { type: c.type, data: { labels: m.labels, datasets: datasets }, plugins: [labelPlugin], options: options });
   }
 
