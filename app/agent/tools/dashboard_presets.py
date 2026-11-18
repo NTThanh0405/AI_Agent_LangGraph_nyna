@@ -140,19 +140,17 @@ ORDER BY 2"""
 NEN_TANG_SOURCE_IDS = ("10000232", "10000169", "SOURCE-KAQK")
 _NEN_TANG_IN = ", ".join("'" + s.replace("'", "''") + "'" for s in NEN_TANG_SOURCE_IDS)
 
-# Trang Nền tảng: kỳ này + kỳ trước + "cùng kỳ tháng trước" (lùi 28 ngày = 4 tuần, giữ đúng thứ trong tuần).
-# Mỗi dòng bán gắn vào kỳ qua bảng độ lùi o: ngay_qd = ngày bán + độ lùi phải rơi vào kỳ này. Một ngày bán
-# có thể thuộc 2 kỳ (vd. kỳ dài > 28 ngày) nên dòng được nhân lên theo kỳ; các khối thường chỉ đọc
-# ky = 'nay' / 'truoc', riêng biểu đồ theo ngày đọc thêm 'thang_truoc'.
+# Trang Nền tảng: kỳ này + kỳ trước (cùng độ dài, liền trước). Mỗi dòng bán gắn vào kỳ qua bảng độ lùi o:
+# ngay_qd = ngày bán + độ lùi phải rơi vào kỳ này (kỳ trước dịch tới n ngày để khớp từng ngày).
 _NEN_TANG_SQL = "WITH " + _PERIOD_CTE + """,
 o AS (
-  SELECT * FROM (VALUES ('nay', 0), ('truoc', __N__), ('thang_truoc', 28)) v(ky, lui)
+  SELECT * FROM (VALUES ('nay', 0), ('truoc', __N__)) v(ky, lui)
 ),
 b AS (
   SELECT s.store_key, s.channel_key, s.tran_date, s.final_amount
   FROM dwh.fact_sales s CROSS JOIN r
   WHERE NOT s.is_deleted
-    AND s.tran_date BETWEEN LEAST(r.p_from, r.d_from - 28) AND r.d_to
+    AND s.tran_date BETWEEN r.p_from AND r.d_to
     AND s.channel_key IN (SELECT channel_key FROM dwh.v_channel
                           WHERE source_id IN (__NEN_TANG_IN__))
 )
@@ -310,7 +308,7 @@ ORDER BY 2"""
 #            where? {cột: giá trị} (lọc cố định riêng khối), exclude? {cột: [giá trị]} (bỏ giá trị khỏi khối),
 #            null_as_zero? (khi xếp, nhãn không có số = 0), positive_only? (chỉ giữ nhãn có số kỳ này > 0),
 #            compare_series? [{ky, label, label_week?, dash?, alpha?}] (dùng với color_by: mỗi nhóm thêm
-#            đường so sánh của kỳ 'ky', vd. 'truoc' hoặc 'thang_truoc')}
+#            đường so sánh của kỳ 'ky', vd. 'truoc')}
 #  table  : {x, x_label?, columns: [{label, column, agg?, denom?, format, delta?, delta_label?,
 #            share? (tỉ trọng trên tổng), good_when?}], total?, sort?, sort_by?, limit?}
 #  pivot  : {row, col, row_label?, col_label?, values: [{label, column, agg?, denom?, format?,
@@ -393,7 +391,7 @@ PRESETS = {
     "nen_tang": {
         "name": "Nền tảng", "title": "Nền tảng",
         "description": "Chỉ gồm các nền tảng giao hàng GrabFood, ShopeeFood, Xanh SM. Bảng chỉ số theo nền tảng (doanh thu, % so kỳ trước, tỉ trọng, số đơn, AOV); "
-                       "doanh thu theo tuần của từng nền tảng (theo từng ngày, so với tuần trước và cùng tuần tháng trước); bảng chéo cửa hàng x nền tảng.",
+                       "doanh thu theo tuần của từng nền tảng (theo từng ngày, so với tuần trước); bảng chéo cửa hàng x nền tảng.",
         "theme": "nyna",
         "filters": [_F_NGAY, _F_NT, _F_KV],
         "kpis": [],
@@ -407,14 +405,12 @@ PRESETS = {
                  {"label": "AOV", "column": "doanh_thu", **_AOV, "format": "number"},
              ],
              "total": True, "sort": "desc", "sort_by": "doanh_thu", "span": 12},
-            # Theo từng ngày trong khoảng đang lọc, mỗi nền tảng 1 đường; thêm đường nét đứt so với
-            # tuần trước (kỳ trước) và nét chấm so với cùng tuần tháng trước (lùi 4 tuần).
+            # Theo từng ngày trong khoảng đang lọc, mỗi nền tảng 1 đường liền + 1 đường nét đứt
+            # cùng màu so với tuần trước (kỳ trước).
             {"title": "Doanh thu Net theo tuần và nền tảng", "type": "line",
              "x": "ngay_qd", "x_format": "weekday", "y": ["doanh_thu"], "color_by": "nen_tang",
              "compare_series": [
                  {"ky": "truoc", "label": "kỳ trước", "label_week": "tuần trước", "dash": [6, 4]},
-                 {"ky": "thang_truoc", "label": "cùng kỳ tháng trước", "label_week": "cùng tuần tháng trước",
-                  "dash": [2, 3], "alpha": 0.4},
              ],
              "height": 320, "span": 12},
             {"title": "Doanh thu Net theo cửa hàng và nền tảng", "type": "pivot",
