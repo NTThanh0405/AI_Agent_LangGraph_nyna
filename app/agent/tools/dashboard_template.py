@@ -844,7 +844,7 @@ TEMPLATE = r"""<!DOCTYPE html>
       if (c.type === 'line') {
         return { label: s.name, data: s.values, borderColor: s.color, backgroundColor: s.color,
           tension: 0.25, cubicInterpolationMode: 'monotone', spanGaps: true,
-          borderWidth: s.prev ? 1.5 : 2, pointRadius: s.prev ? 0 : (m.labels.length > 45 ? 0 : 3),
+          borderWidth: s.dash ? 1.5 : 2, pointRadius: s.dash ? 0 : (m.labels.length > 45 ? 0 : 3),
           borderDash: s.dash || (s.prev ? [5, 4] : []), labelColor: s.prev ? muted : ink, noLabel: !!s.dash };
       }
       return { label: s.name, data: s.values, backgroundColor: s.color, borderRadius: 1,
